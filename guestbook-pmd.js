@@ -1,11 +1,11 @@
 const TELEBOT_TOKEN = 'xxxx:xxxx';
-// const TELEGROUP_ID = -1003871770183;
-const TELEGROUP_ID = 679134445;
+// const TELEGROUP_ID = xxxx;
+const TELEGROUP_ID = "xxx";
 const SPREADSHEET_ID = "xxxx";
 const NAMA_TAB_UTAMA = "xxx";
 const WA_PHONE_NUMBER_ID = "xxxx";
 const WA_ACCESS_TOKEN = "xxxx";
-const WA_TEMPLATE_NAME = "xxx";
+const WA_TEMPLATE_NAME = "notifikasi_tiket";
 const WA_WEBHOOK_VERIFY_TOKEN = "xxxx";
 const SKM_URL = "xx";
 
@@ -323,7 +323,7 @@ function formatNomorWA(phone) {
 
 function activateTelegramWebhook() {
     const token = TELEBOT_TOKEN;
-    const urlWebApp = 'https://script.google.com/macros/s/AKfycbxj-oNkQqggATp20PSp-eczyn8dcQqq1a7jzHxmRZrJCEJs7nzvJ5R_xeYZj6WzVwsN/exec';
+    const urlWebApp = 'https://script.google.com/macros/s/AKfycbyWzBMUlKNwPyil99TQh1B9UlbwGa3OHMdvKqdoHcsYYpc5Knxz5n3viDGwVj-dvlXP/exec';
 
     const url = `https://api.telegram.org/bot${token}/setWebhook?url=${urlWebApp}&drop_pending_updates=true`;
     const response = UrlFetchApp.fetch(url);
