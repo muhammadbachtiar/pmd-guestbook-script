@@ -2,6 +2,7 @@ const TELEBOT_TOKEN = 'xxxx:xxxx';
 // const TELEGROUP_ID = xxxx;
 const TELEGROUP_ID = "xxx";
 const SPREADSHEET_ID = "xxxx";
+const DEV_SPREADSHEET_ID = "xx-xxxx";
 const NAMA_TAB_UTAMA = "xxx";
 const WA_PHONE_NUMBER_ID = "xxxx";
 const WA_ACCESS_TOKEN = "xxxx";
@@ -9,22 +10,23 @@ const WA_TEMPLATE_NAME = "notifikasi_tiket";
 const WA_WEBHOOK_VERIFY_TOKEN = "xxxx";
 const SKM_URL = "xx";
 
-function default_keyboard(row) {
+function default_keyboard(row, isDev = false) {
+    const prefix = isDev ? "DEV_" : "";
     return {
         inline_keyboard: [
             [
-                { text: "Sekretariat", callback_data: `PROSES_SEK_${row}` },
-                { text: "Ekonomi Desa", callback_data: `PROSES_EKO_${row}` }
+                { text: "Sekretariat", callback_data: `${prefix}PROSES_SEK_${row}` },
+                { text: "Ekonomi Desa", callback_data: `${prefix}PROSES_EKO_${row}` }
             ],
             [
-                { text: "Pemberdayaan", callback_data: `PROSES_PMD_${row}` },
-                { text: "Keuangan & Aset", callback_data: `PROSES_KEU_${row}` }
+                { text: "Pemberdayaan", callback_data: `${prefix}PROSES_PMD_${row}` },
+                { text: "Keuangan & Aset", callback_data: `${prefix}PROSES_KEU_${row}` }
             ],
             [
-                { text: "Pemerintahan Desa", callback_data: `PROSES_PEM_${row}` }
+                { text: "Pemerintahan Desa", callback_data: `${prefix}PROSES_PEM_${row}` }
             ],
             [
-                { text: "❌ Tolak Laporan", callback_data: `TANYA_TOLAK_${row}` }
+                { text: "❌ Tolak Laporan", callback_data: `${prefix}TANYA_TOLAK_${row}` }
             ]
         ]
     };
@@ -87,7 +89,6 @@ function onFormSubmit(e) {
         if (nama.includes("[TEST]") || nama.includes("DEV-")) {
 
 
-            const DEV_SPREADSHEET_ID = "1w3VyX6waW6cl1rBy9XYeoX1ID3rnCH6nNLLKm_w-RU4";
             const ssDev = SpreadsheetApp.openById(DEV_SPREADSHEET_ID);
             const sheetDev = ssDev.getSheetByName(sheetProd.getName());
 
@@ -146,7 +147,10 @@ function onFormSubmit(e) {
             const uraian = e.namedValues['Uraian Singkat atau Detail Pengaduan'] ? e.namedValues['Uraian Singkat atau Detail Pengaduan'][0] : 'KOSONG';
             const noWaRaw = e.namedValues['Nomor WhatsApp atau Telepon'] ? e.namedValues['Nomor WhatsApp atau Telepon'][0] : '';
 
-            sendTelegramAdmin(idTicketDev, nama, nik, nama_instansi, jenis_keperluan, uraian, rowDev);
+            const telegramMsgIdDev = sendTelegramAdmin(idTicketDev, nama, nik, nama_instansi, jenis_keperluan, uraian, rowDev, true);
+            if (telegramMsgIdDev) {
+                sheetDev.getRange(rowDev, 15).setValue(telegramMsgIdDev); // Kolom O (15) = Telegram_Message_ID
+            }
 
             if (noWaRaw && noWaRaw !== 'KOSONG') {
                 const cleanNoWa = formatNomorWA(noWaRaw);
@@ -170,7 +174,10 @@ function onFormSubmit(e) {
             const uraian = e.namedValues['Uraian Singkat atau Detail Pengaduan'] ? e.namedValues['Uraian Singkat atau Detail Pengaduan'][0] : 'KOSONG';
             const noWaRaw = e.namedValues['Nomor WhatsApp atau Telepon'] ? e.namedValues['Nomor WhatsApp atau Telepon'][0] : '';
 
-            sendTelegramAdmin(idTicket, nama, nik, nama_instansi, jenis_keperluan, uraian, rowProd);
+            const telegramMsgId = sendTelegramAdmin(idTicket, nama, nik, nama_instansi, jenis_keperluan, uraian, rowProd, false);
+            if (telegramMsgId) {
+                sheetProd.getRange(rowProd, 15).setValue(telegramMsgId); // Kolom O (15) = Telegram_Message_ID
+            }
 
             if (noWaRaw && noWaRaw !== 'KOSONG') {
                 const cleanNoWa = formatNomorWA(noWaRaw);
@@ -183,7 +190,7 @@ function onFormSubmit(e) {
     }
 }
 
-function sendTelegramAdmin(idTicket, nama, nik, nama_instansi, jenis_keperluan, uraian, row) {
+function sendTelegramAdmin(idTicket, nama, nik, nama_instansi, jenis_keperluan, uraian, row, isDev = false) {
     const pesanText =
         `🚨 *Laporan/Tamu Baru Masuk!* 🚨
 
@@ -204,13 +211,24 @@ function sendTelegramAdmin(idTicket, nama, nik, nama_instansi, jenis_keperluan, 
             chat_id: TELEGROUP_ID,
             text: pesanText,
             parse_mode: 'Markdown',
-            reply_markup: default_keyboard(row)
+            reply_markup: default_keyboard(row, isDev)
         }),
         muteHttpExceptions: true
     };
 
     const response = UrlFetchApp.fetch(url, options);
-    Logger.log("Log Telegram: " + response.getContentText());
+    const content = response.getContentText();
+    Logger.log("Log Telegram: " + content);
+
+    try {
+        const resJson = JSON.parse(content);
+        if (resJson.ok && resJson.result && resJson.result.message_id) {
+            return resJson.result.message_id;
+        }
+    } catch (err) {
+        Logger.log("Gagal mengambil message_id Telegram: " + err.toString());
+    }
+    return null;
 }
 
 function sendWhatsAppUser(noWa, name, id_ticket) {
@@ -610,7 +628,25 @@ function prosesPendingUpdate(updateId, data) {
 
     try {
         if (!data) return;
-        const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+
+        const isCallback = !!data.callback_query;
+        typeLog = isCallback ? "CALLBACK" : "REPLY";
+        const isReply = !isCallback && data.message && data.message.reply_to_message;
+
+        let isDev = false;
+        if (isCallback) {
+            if (data.callback_query.data && data.callback_query.data.startsWith("DEV_")) {
+                isDev = true;
+            }
+        } else if (isReply) {
+            const repliedText = data.message.reply_to_message ? data.message.reply_to_message.text || "" : "";
+            if (repliedText.includes("_DEV]")) {
+                isDev = true;
+            }
+        }
+
+        const targetSpreadsheetId = isDev ? DEV_SPREADSHEET_ID : SPREADSHEET_ID;
+        const ss = SpreadsheetApp.openById(targetSpreadsheetId);
 
         logSheet = ss.getSheetByName("Debug_Log") || ss.insertSheet("Debug_Log");
         if (logSheet.getLastRow() === 0) {
@@ -619,10 +655,6 @@ function prosesPendingUpdate(updateId, data) {
 
         const sheet = ss.getSheetByName(NAMA_TAB_UTAMA);
         if (!sheet) throw new Error("Sheet utama tidak ditemukan");
-
-        const isCallback = !!data.callback_query;
-        typeLog = isCallback ? "CALLBACK" : "REPLY";
-        const isReply = !isCallback && data.message && data.message.reply_to_message;
 
         const mapBidang = {
             "SEK": "Bidang Sekretariat",
@@ -635,12 +667,15 @@ function prosesPendingUpdate(updateId, data) {
         // ==================== CALLBACK QUERY ====================
         if (isCallback) {
             const cq = data.callback_query;
-            const callbackData = cq.data;
+            let callbackData = cq.data;
+            if (callbackData.startsWith("DEV_")) {
+                callbackData = callbackData.substring(4);
+            }
             const parts = callbackData.split('_');
             aksiLog = parts[0];
             rowLog = parseInt(parts[parts.length - 1]);
 
-            console.log(`[CALLBACK] Processing callbackData: ${callbackData}`);
+            console.log(`[CALLBACK] Processing callbackData: ${cq.data} (isDev: ${isDev})`);
 
             if (isNaN(rowLog) || rowLog < 2) throw new Error("Row tidak valid");
 
@@ -653,7 +688,7 @@ function prosesPendingUpdate(updateId, data) {
                     payload: JSON.stringify({
                         chat_id: cq.message.chat.id,
                         message_id: cq.message.message_id,
-                        reply_markup: default_keyboard(rowLog)
+                        reply_markup: default_keyboard(rowLog, isDev)
                     })
                 });
                 statusLog = "SUCCESS";
@@ -670,11 +705,12 @@ function prosesPendingUpdate(updateId, data) {
                 sheet.getRange(rowLog, 12).setValue(namaBidang);
 
                 const pesanUpdate = `${cq.message.text}\n\n✅ *STATUS: Diproses*\nOleh: ${namaBidang}\nPetugas: ${cq.from.first_name}`;
+                const devPrefix = isDev ? "DEV_" : "";
 
                 const keyboard = {
                     inline_keyboard: [
-                        [{ text: "✅ Tandai Selesai", callback_data: `TANYA_SELESAI_${rowLog}` }],
-                        [{ text: "❌ Batal", callback_data: `BATAL_${rowLog}` }]
+                        [{ text: "✅ Tandai Selesai", callback_data: `${devPrefix}TANYA_SELESAI_${rowLog}` }],
+                        [{ text: "❌ Batal", callback_data: `${devPrefix}BATAL_${rowLog}` }]
                     ]
                 };
 
@@ -703,10 +739,11 @@ function prosesPendingUpdate(updateId, data) {
                 const originalMessageId = cq.message.message_id;
 
                 const pesanUpdate = `${cq.message.text}\n\n✅ *STATUS: Ditolak*\nOleh: ${username}\n`;
+                const devPrefix = isDev ? "DEV_" : "";
 
                 const keyboard = {
                     inline_keyboard: [
-                        [{ text: "❌ Batal", callback_data: `BATAL_${rowLog}` }]
+                        [{ text: "❌ Batal", callback_data: `${devPrefix}BATAL_${rowLog}` }]
                     ]
                 };
 
@@ -721,7 +758,8 @@ function prosesPendingUpdate(updateId, data) {
                     })
                 });
 
-                const replyMsg = `[#ROW_${rowStr}_${jenis}] [#MAIN_${originalMessageId}] ${username}, silakan balas (reply) pesan ini dengan *${kataTugas}* untuk laporan ini.\nTiket: ${idTicket}`;
+                const devTag = isDev ? "_DEV" : "";
+                const replyMsg = `[#ROW_${rowStr}_${jenis}${devTag}] [#MAIN_${originalMessageId}] ${username}, silakan balas (reply) pesan ini dengan *${kataTugas}* untuk laporan ini.\nTiket: ${idTicket}`;
 
                 UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/sendMessage`, {
                     method: 'post', contentType: 'application/json', muteHttpExceptions: true,
@@ -742,7 +780,7 @@ function prosesPendingUpdate(updateId, data) {
         // ==================== REPLY MESSAGE ====================
         else if (isReply) {
             const repliedText = data.message.reply_to_message ? data.message.reply_to_message.text || "" : "";
-            const matchRow = repliedText.match(/#ROW_(\d+)_([A-Z]+)/);
+            const matchRow = repliedText.match(/#ROW_(\d+)_([A-Z]+)(_DEV)?/);
             const matchMain = repliedText.match(/#MAIN_(\d+)/);
 
             if (matchRow && matchMain) {
@@ -916,4 +954,163 @@ function runTestTelgramReply() {
     console.log("--- MEMULAI TES BALAS REPLY (BARIS 10) ---");
     doPost(mockEvent);
     console.log("--- TES SELESAI --- Kunjungi Spreadsheet Anda untuk cek Baris 10 Kolom K & M");
+}
+
+/**
+ * Handler Installable Trigger - dipanggil otomatis setiap kali Admin mengedit sel di Spreadsheet.
+ * Kolom yang diawasi: K (11) = Status, L (12) = Bidang PJ, M (13) = Catatan/Ulasan.
+ */
+function onSpreadsheetEdit(e) {
+    try {
+        if (!e || !e.range) return;
+
+        const sheet = e.range.getSheet();
+        if (sheet.getName() !== NAMA_TAB_UTAMA) return;
+
+        const row = e.range.getRow();
+        if (row < 2) return; // Abaikan baris header
+
+        const col = e.range.getColumn();
+        // Hanya proses jika yang diedit adalah Kolom K, L, atau M
+        if (col !== 11 && col !== 12 && col !== 13) return;
+
+        const spreadsheetId = sheet.getParent().getId();
+        const isDev = (spreadsheetId === DEV_SPREADSHEET_ID);
+
+        let status = (sheet.getRange(row, 11).getValue() || "").toString().trim();
+        let bidang = (sheet.getRange(row, 12).getValue() || "").toString().trim();
+        let catatan = (sheet.getRange(row, 13).getValue() || "").toString().trim();
+        const idTicket = (sheet.getRange(row, 10).getValue() || "").toString().trim();
+        const telegramMsgId = sheet.getRange(row, 15).getValue(); // Kolom O (15)
+
+        console.log(`[onSpreadsheetEdit] Edit di ${isDev ? 'DEV' : 'PROD'} Baris ${row} Kolom ${col}. Tiket: ${idTicket}, Status: ${status}`);
+
+        // ========== GUARD: Abaikan jika ID Tiket tidak ada (bukan baris data valid) ==========
+        if (!idTicket) return;
+
+        // ========== AUTO-CORRECTION: Menunggu + Bidang Diisi → Advance ke Diproses ==========
+        if ((status.toUpperCase() === "MENUNGGU TINDAKAN" || status === "") && bidang !== "") {
+            status = "Diproses";
+            sheet.getRange(row, 11).setValue("Diproses");
+            console.log(`[Auto-Correction Row ${row}] Status di-advance ke 'Diproses' karena Bidang PJ diisi.`);
+        }
+
+        // ========== SINKRONISASI TELEGRAM ==========
+        if (!telegramMsgId) {
+            console.warn(`[onSpreadsheetEdit Row ${row}] Kolom O (Telegram_Message_ID) kosong. Sinkronisasi Telegram dilewati.`);
+        } else {
+            syncEditToTelegram(telegramMsgId, status, bidang, catatan, idTicket, row, isDev);
+        }
+
+        // ========== SAFETY GUARD: Kirim WA Selesai hanya jika Catatan sudah diisi ==========
+        if (status.toUpperCase() === "SELESAI") {
+            if (catatan !== "") {
+                const noWaRaw = sheet.getRange(row, 4).getValue(); // Kolom D (4) = Nomor WA
+                if (noWaRaw && noWaRaw !== "KOSONG" && noWaRaw !== "") {
+                    const noWaBersih = formatNomorWA(noWaRaw.toString());
+
+                    // Cache agar WA Selesai tidak dikirim berulang untuk tiket yang sama
+                    const cache = CacheService.getScriptCache();
+                    const cacheKey = `wa_selesai_${isDev ? 'dev_' : ''}${row}_${idTicket}`;
+                    if (!cache.get(cacheKey)) {
+                        const pesanSelesai =
+                            `Halo Bapak/Ibu,\n\nKami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTicket}* telah *SELESAI* ditindaklanjuti.\n\nCatatan Penyelesaian:\n${catatan}\n\nSebagai upaya peningkatan kualitas pelayanan publik, silakan Bapak/Ibu mengisi Survei Kepuasan Masyarakat (SKM) melalui tautan berikut:\n🔗 ${SKM_URL}\n\nSetelah mengisi survei tersebut, Anda dapat melihat detail penyelesaian dengan mengetik:\n*CEK ${idTicket}*\n\nTerima kasih atas partisipasi Anda telah menggunakan SI Buku Tamu Online DPMD Kabupaten Muara Enim. 🙏`;
+
+                        kirimWaTeksBiasa(noWaBersih, pesanSelesai);
+                        cache.put(cacheKey, "true", 86400); // 24 jam agar tidak dikirim ulang
+                        console.log(`[onSpreadsheetEdit Row ${row}] WA Selesai berhasil dikirim ke ${noWaBersih}`);
+                    }
+                }
+            } else {
+                console.log(`[Safety Guard Row ${row}] Status = Selesai tetapi Catatan (Kolom M) masih kosong. WA DITAHAN.`);
+            }
+        }
+
+    } catch (err) {
+        console.error("Error pada onSpreadsheetEdit: " + err.toString());
+    }
+}
+
+/**
+ * Memperbarui teks dan tombol inline pesan Telegram asli sesuai kondisi terbaru dari Sheet.
+ */
+function syncEditToTelegram(messageId, status, bidang, catatan, idTicket, row, isDev = false) {
+    const statusUpper = status.toUpperCase();
+    let text = "";
+    let keyboard = { inline_keyboard: [] };
+    const devPrefix = isDev ? "DEV_" : "";
+
+    if (statusUpper === "MENUNGGU TINDAKAN" || statusUpper === "") {
+        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${idTicket}\n\nSilakan tentukan bidang penanggung jawab:`;
+        keyboard = default_keyboard(row, isDev);
+
+    } else if (statusUpper === "DIPROSES") {
+        const bidangStr = bidang || "(Bidang belum ditentukan)";
+        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${idTicket}\n\n✅ *STATUS: Diproses*\nOleh: ${bidangStr}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
+        keyboard = {
+            inline_keyboard: [
+                [{ text: "✅ Tandai Selesai", callback_data: `${devPrefix}TANYA_SELESAI_${row}` }],
+                [{ text: "❌ Batal", callback_data: `${devPrefix}BATAL_${row}` }]
+            ]
+        };
+
+    } else if (statusUpper === "SELESAI") {
+        const bidangStr = bidang || "(Bidang)";
+        const catatanStr = catatan || "(Catatan belum diisi)";
+        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${idTicket}\n\n🎉 *STATUS: Selesai*\nOleh: ${bidangStr}\nCatatan: ${catatanStr}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
+        keyboard = { inline_keyboard: [] }; // Hapus semua tombol
+
+    } else if (statusUpper === "DITOLAK") {
+        const alasanStr = catatan || "(Alasan belum diisi)";
+        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${idTicket}\n\n❌ *STATUS: Ditolak*\nAlasan: ${alasanStr}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
+        keyboard = { inline_keyboard: [] }; // Hapus semua tombol
+
+    } else {
+        // Status tidak dikenal — tetap update teks apa adanya
+        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${idTicket}\n\n📊 *Status:* ${status}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
+        keyboard = { inline_keyboard: [] };
+    }
+
+    const res = UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageText`, {
+        method: 'post',
+        contentType: 'application/json',
+        muteHttpExceptions: true,
+        payload: JSON.stringify({
+            chat_id: TELEGROUP_ID,
+            message_id: messageId,
+            text: text,
+            parse_mode: 'Markdown',
+            reply_markup: keyboard
+        })
+    });
+    console.log(`[syncEditToTelegram] Response Telegram untuk MsgID ${messageId}: ${res.getResponseCode()}`);
+}
+
+/**
+ * Fungsi pembantu untuk memasang trigger onSpreadsheetEdit pada spreadsheet PROD dan DEV.
+ */
+function setupOnEditTrigger() {
+    // 1. Pasang Trigger untuk Spreadsheet Produksi
+    try {
+        const ssProd = SpreadsheetApp.openById(SPREADSHEET_ID);
+        ScriptApp.newTrigger('onSpreadsheetEdit')
+            .forSpreadsheet(ssProd)
+            .onEdit()
+            .create();
+        Logger.log("Trigger onSpreadsheetEdit berhasil dipasang untuk PROD!");
+    } catch (e) {
+        Logger.log("Gagal memasang trigger PROD: " + e.toString());
+    }
+
+    // 2. Pasang Trigger untuk Spreadsheet DEV
+    try {
+        const ssDev = SpreadsheetApp.openById(DEV_SPREADSHEET_ID);
+        ScriptApp.newTrigger('onSpreadsheetEdit')
+            .forSpreadsheet(ssDev)
+            .onEdit()
+            .create();
+        Logger.log("Trigger onSpreadsheetEdit berhasil dipasang untuk DEV!");
+    } catch (e) {
+        Logger.log("Gagal memasang trigger DEV: " + e.toString());
+    }
 }
