@@ -376,20 +376,13 @@ function doPost(e) {
 
 function handleTelegramWebhook(data, rawData) {
     const updateId = data.update_id;
-    const props = PropertiesService.getScriptProperties();
-    const propKey = "processed_tg_" + updateId;
-
     const cache = CacheService.getScriptCache();
-    if (props.getProperty(propKey) || cache.get(propKey)) {
+    const cacheKey = "tg_" + updateId;
+
+    if (cache.get(cacheKey)) {
         return ContentService.createTextOutput("OK");
     }
-
-    try {
-        props.setProperty(propKey, "true");
-        cache.put(propKey, "true", 21600); // 6 jam cache
-    } catch (e) {
-        console.error("Error setting deduplication key:", e);
-    }
+    cache.put(cacheKey, "1", 21600); // 6 jam
 
     if (data.callback_query) {
         try {
@@ -399,9 +392,7 @@ function handleTelegramWebhook(data, rawData) {
                 muteHttpExceptions: true,
                 payload: JSON.stringify({ callback_query_id: data.callback_query.id, text: "Memproses..." })
             });
-        } catch (e) {
-            console.error("Error answerCallbackQuery:", e);
-        }
+        } catch (e) { /* abaikan */ }
     }
 
     prosesPendingUpdate(updateId, data);
@@ -605,87 +596,81 @@ function prosesPendingWhatsAppUpdate(waUniqueId, data) {
     }
 }
 
-function isDevMessageOrTicket(messageId, ticketId) {
-    if (!DEV_SPREADSHEET_ID || DEV_SPREADSHEET_ID === "" || DEV_SPREADSHEET_ID.includes("xx-")) return false;
-    try {
-        const ssDev = SpreadsheetApp.openById(DEV_SPREADSHEET_ID);
-        const sheetDev = ssDev.getSheetByName(NAMA_TAB_UTAMA);
-        if (!sheetDev) return false;
+function detectIsDev(data) {
+    const isCallback = !!data.callback_query;
+    const isReply = !isCallback && data.message && data.message.reply_to_message;
 
-        if (messageId) {
-            const finder = sheetDev.getRange("O:O").createTextFinder(messageId.toString()).matchEntireCell(true).findNext();
-            if (finder) return true;
+    // 1. Callback: cek prefix DEV_
+    if (isCallback) {
+        if (data.callback_query.data && data.callback_query.data.startsWith("DEV_")) {
+            return true;
         }
-
-        if (ticketId) {
-            const finderTiket = sheetDev.getRange("J:J").createTextFinder(ticketId.toString()).matchEntireCell(true).findNext();
-            if (finderTiket) return true;
-        }
-    } catch (e) {
-        console.error("Error pada isDevMessageOrTicket:", e);
     }
+
+    // 2. Reply: cek tag _DEV di teks yang di-reply
+    if (isReply) {
+        const repliedText = data.message.reply_to_message.text || "";
+        if (repliedText.includes("_DEV")) {
+            return true;
+        }
+    }
+
     return false;
 }
 
-function prosesPendingUpdate(updateId, data) {
-    let logSheet = null;
-    const cache = CacheService.getScriptCache();
-    const startTime = new Date();
+function verifySheetTarget(row, ticketIdFromTelegram) {
+    if (!ticketIdFromTelegram || !DEV_SPREADSHEET_ID || DEV_SPREADSHEET_ID.includes("xx-")) return false;
+    try {
+        const ssProd = SpreadsheetApp.openById(SPREADSHEET_ID);
+        const sheetProd = ssProd.getSheetByName(NAMA_TAB_UTAMA);
+        if (sheetProd) {
+            const prodTicket = (sheetProd.getRange(row, 10).getValue() || "").toString().trim();
+            if (prodTicket.toUpperCase() === ticketIdFromTelegram.toUpperCase()) {
+                return false; // Cocok di PROD, tidak perlu ke DEV
+            }
+        }
+    } catch (e) { /* abaikan */ }
+    return true; // Tidak cocok di PROD → kemungkinan DEV
+}
 
-    let typeLog = "UNKNOWN";
-    let aksiLog = "UNKNOWN";
-    let rowLog = "";
+function prosesPendingUpdate(updateId, data) {
+    const startTime = new Date();
     let statusLog = "START";
-    let detailLog = "Proses dimulai";
+    let detailLog = "";
 
     try {
         if (!data) return;
 
         const isCallback = !!data.callback_query;
-        typeLog = isCallback ? "CALLBACK" : "REPLY";
         const isReply = !isCallback && data.message && data.message.reply_to_message;
 
-        let isDev = false;
-        if (isCallback) {
+        let isDev = detectIsDev(data);
+
+        // Untuk callback tanpa prefix DEV_, verifikasi ringan via row + ticket match
+        if (!isDev && isCallback) {
             const cq = data.callback_query;
-            if (cq.data && cq.data.startsWith("DEV_")) {
-                isDev = true;
-            } else {
-                const msgId = cq.message ? cq.message.message_id : null;
-                const msgText = cq.message ? cq.message.text || "" : "";
-                const matchTiket = msgText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
-                const ticketId = matchTiket ? matchTiket[0] : null;
-
-                if (isDevMessageOrTicket(msgId, ticketId)) {
-                    isDev = true;
-                    console.log(`[Smart DEV Detection] MessageID ${msgId} / Tiket ${ticketId} terdeteksi milik Sheet DEV.`);
-                }
+            let cbData = cq.data || "";
+            const parts = cbData.split('_');
+            const rowNum = parseInt(parts[parts.length - 1]);
+            const msgText = cq.message ? cq.message.text || "" : "";
+            const matchTiket = msgText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
+            if (matchTiket && !isNaN(rowNum) && rowNum >= 2) {
+                isDev = verifySheetTarget(rowNum, matchTiket[0]);
             }
-        } else if (isReply) {
-            const repliedText = data.message.reply_to_message ? data.message.reply_to_message.text || "" : "";
-            if (repliedText.includes("_DEV")) {
-                isDev = true;
-            } else {
-                const matchTiket = repliedText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
-                const ticketId = matchTiket ? matchTiket[0] : null;
-                const mainMatch = repliedText.match(/#MAIN_(\d+)/);
-                const mainMsgId = mainMatch ? mainMatch[1] : null;
+        }
 
-                if (isDevMessageOrTicket(mainMsgId, ticketId)) {
-                    isDev = true;
-                    console.log(`[Smart DEV Detection Reply] Tiket ${ticketId} / MainID ${mainMsgId} terdeteksi milik Sheet DEV.`);
-                }
+        // Untuk reply tanpa tag _DEV, verifikasi ringan
+        if (!isDev && isReply) {
+            const repliedText = data.message.reply_to_message.text || "";
+            const matchRow = repliedText.match(/#ROW_(\d+)_/);
+            const matchTiket = repliedText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
+            if (matchRow && matchTiket) {
+                isDev = verifySheetTarget(parseInt(matchRow[1]), matchTiket[0]);
             }
         }
 
         const targetSpreadsheetId = isDev ? DEV_SPREADSHEET_ID : SPREADSHEET_ID;
         const ss = SpreadsheetApp.openById(targetSpreadsheetId);
-
-        logSheet = ss.getSheetByName("Debug_Log") || ss.insertSheet("Debug_Log");
-        if (logSheet.getLastRow() === 0) {
-            logSheet.appendRow(["Waktu", "Tipe", "UpdateID", "Aksi", "Row", "Status", "Detail"]);
-        }
-
         const sheet = ss.getSheetByName(NAMA_TAB_UTAMA);
         if (!sheet) throw new Error("Sheet utama tidak ditemukan");
 
@@ -926,9 +911,7 @@ function prosesPendingUpdate(updateId, data) {
         console.error("Proses Pending Error:", err);
     } finally {
         const duration = new Date() - startTime;
-        if (logSheet) {
-            logSheet.appendRow([new Date(), typeLog, updateId, aksiLog, rowLog, statusLog, `${detailLog} (Duration: ${duration}ms)`]);
-        }
+        console.log(`[prosesPendingUpdate] updateId=${updateId} status=${statusLog} duration=${duration}ms detail=${detailLog}`);
     }
 }
 
