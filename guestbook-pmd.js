@@ -605,6 +605,28 @@ function prosesPendingWhatsAppUpdate(waUniqueId, data) {
     }
 }
 
+function isDevMessageOrTicket(messageId, ticketId) {
+    if (!DEV_SPREADSHEET_ID || DEV_SPREADSHEET_ID === "" || DEV_SPREADSHEET_ID.includes("xx-")) return false;
+    try {
+        const ssDev = SpreadsheetApp.openById(DEV_SPREADSHEET_ID);
+        const sheetDev = ssDev.getSheetByName(NAMA_TAB_UTAMA);
+        if (!sheetDev) return false;
+
+        if (messageId) {
+            const finder = sheetDev.getRange("O:O").createTextFinder(messageId.toString()).matchEntireCell(true).findNext();
+            if (finder) return true;
+        }
+
+        if (ticketId) {
+            const finderTiket = sheetDev.getRange("J:J").createTextFinder(ticketId.toString()).matchEntireCell(true).findNext();
+            if (finderTiket) return true;
+        }
+    } catch (e) {
+        console.error("Error pada isDevMessageOrTicket:", e);
+    }
+    return false;
+}
+
 function prosesPendingUpdate(updateId, data) {
     let logSheet = null;
     const cache = CacheService.getScriptCache();
@@ -625,13 +647,34 @@ function prosesPendingUpdate(updateId, data) {
 
         let isDev = false;
         if (isCallback) {
-            if (data.callback_query.data && data.callback_query.data.startsWith("DEV_")) {
+            const cq = data.callback_query;
+            if (cq.data && cq.data.startsWith("DEV_")) {
                 isDev = true;
+            } else {
+                const msgId = cq.message ? cq.message.message_id : null;
+                const msgText = cq.message ? cq.message.text || "" : "";
+                const matchTiket = msgText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
+                const ticketId = matchTiket ? matchTiket[0] : null;
+
+                if (isDevMessageOrTicket(msgId, ticketId)) {
+                    isDev = true;
+                    console.log(`[Smart DEV Detection] MessageID ${msgId} / Tiket ${ticketId} terdeteksi milik Sheet DEV.`);
+                }
             }
         } else if (isReply) {
             const repliedText = data.message.reply_to_message ? data.message.reply_to_message.text || "" : "";
             if (repliedText.includes("_DEV")) {
                 isDev = true;
+            } else {
+                const matchTiket = repliedText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
+                const ticketId = matchTiket ? matchTiket[0] : null;
+                const mainMatch = repliedText.match(/#MAIN_(\d+)/);
+                const mainMsgId = mainMatch ? mainMatch[1] : null;
+
+                if (isDevMessageOrTicket(mainMsgId, ticketId)) {
+                    isDev = true;
+                    console.log(`[Smart DEV Detection Reply] Tiket ${ticketId} / MainID ${mainMsgId} terdeteksi milik Sheet DEV.`);
+                }
             }
         }
 
