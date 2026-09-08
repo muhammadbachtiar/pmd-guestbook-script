@@ -640,7 +640,7 @@ function prosesPendingUpdate(updateId, data) {
             }
         } else if (isReply) {
             const repliedText = data.message.reply_to_message ? data.message.reply_to_message.text || "" : "";
-            if (repliedText.includes("_DEV]")) {
+            if (repliedText.includes("_DEV")) {
                 isDev = true;
             }
         }
@@ -786,15 +786,19 @@ function prosesPendingUpdate(updateId, data) {
             if (matchRow && matchMain) {
                 rowLog = parseInt(matchRow[1]);
                 const jenis = matchRow[2];
+                if (matchRow[3] === "_DEV") {
+                    isDev = true;
+                }
                 aksiLog = jenis;
                 const originalMessageId = parseInt(matchMain[1]);
 
                 const teksBalasan = data.message.text;
                 const pengisi = data.message.from.first_name;
                 const idTicket = sheet.getRange(rowLog, 10).getValue() || "";
+                const bidangPJ = sheet.getRange(rowLog, 12).getValue() || "";
                 const chatId = data.message.chat.id;
 
-                console.log(`[REPLY] Processing ${jenis} for row ${rowLog}, ticket: ${idTicket}`);
+                console.log(`[REPLY] Processing ${jenis} for row ${rowLog}, ticket: ${idTicket} (isDev: ${isDev})`);
 
                 if (jenis === "TOLAK") {
                     sheet.getRange(rowLog, 11).setValue("Ditolak");
@@ -832,6 +836,11 @@ function prosesPendingUpdate(updateId, data) {
                     }
                 }
 
+                // Perbarui pesan Telegram utama agar menampilkan status Selesai/Ditolak beserta alasannya
+                const telegramMsgIdInSheet = sheet.getRange(rowLog, 15).getValue();
+                const targetMsgId = telegramMsgIdInSheet || originalMessageId;
+                syncEditToTelegram(targetMsgId, jenis === "TOLAK" ? "Ditolak" : "Selesai", bidangPJ, teksBalasan, idTicket, rowLog, isDev);
+
                 try {
                     const hideRes = UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageReplyMarkup`, {
                         method: 'post',
@@ -848,14 +857,14 @@ function prosesPendingUpdate(updateId, data) {
                     console.error("Error hiding markup:", err);
                 }
 
-                // Konfirmasi
+                // Konfirmasi ke Grup Telegram
                 UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/sendMessage`, {
                     method: 'post',
                     contentType: 'application/json',
                     muteHttpExceptions: true,
                     payload: JSON.stringify({
                         chat_id: chatId,
-                        text: `✅ Laporan ${idTicket} berhasil ${jenis === "TOLAK" ? "DITOLAK" : "DISELESAIKAN"} oleh ${pengisi}.`,
+                        text: `✅ Laporan ${idTicket} (${isDev ? 'DEV' : 'PROD'}) berhasil ${jenis === "TOLAK" ? "DITOLAK" : "DISELESAIKAN"} oleh ${pengisi}.`,
                         parse_mode: "Markdown"
                     })
                 });
