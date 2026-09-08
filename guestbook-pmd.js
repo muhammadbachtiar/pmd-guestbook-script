@@ -376,42 +376,32 @@ function doPost(e) {
 
 function handleTelegramWebhook(data, rawData) {
     const updateId = data.update_id;
+    const props = PropertiesService.getScriptProperties();
+    const propKey = "processed_tg_" + updateId;
+
     const cache = CacheService.getScriptCache();
-    const cacheKey = "processed_" + updateId;
-
-    let isDuplicate = false;
-    const lock = LockService.getScriptLock();
-    try {
-        if (lock.tryLock(3000)) {
-            if (cache.get(cacheKey)) {
-                isDuplicate = true;
-            } else {
-                cache.put(cacheKey, "true", 7200);
-            }
-        }
-    } catch (e) {
-        console.error("Lock/Cache Error in handleTelegramWebhook (proceeding anyway):", e);
-    } finally {
-        try {
-            if (lock.hasLock()) {
-                lock.releaseLock();
-            }
-        } catch (el) {
-            console.error("Error releasing lock:", el);
-        }
-    }
-
-    if (isDuplicate) {
+    if (props.getProperty(propKey) || cache.get(propKey)) {
         return ContentService.createTextOutput("OK");
     }
 
+    try {
+        props.setProperty(propKey, "true");
+        cache.put(propKey, "true", 21600); // 6 jam cache
+    } catch (e) {
+        console.error("Error setting deduplication key:", e);
+    }
+
     if (data.callback_query) {
-        UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/answerCallbackQuery`, {
-            method: 'post',
-            contentType: 'application/json',
-            muteHttpExceptions: true,
-            payload: JSON.stringify({ callback_query_id: data.callback_query.id, text: "Memproses..." })
-        });
+        try {
+            UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/answerCallbackQuery`, {
+                method: 'post',
+                contentType: 'application/json',
+                muteHttpExceptions: true,
+                payload: JSON.stringify({ callback_query_id: data.callback_query.id, text: "Memproses..." })
+            });
+        } catch (e) {
+            console.error("Error answerCallbackQuery:", e);
+        }
     }
 
     prosesPendingUpdate(updateId, data);
@@ -797,6 +787,16 @@ function prosesPendingUpdate(updateId, data) {
                 const idTicket = sheet.getRange(rowLog, 10).getValue() || "";
                 const bidangPJ = sheet.getRange(rowLog, 12).getValue() || "";
                 const chatId = data.message.chat.id;
+
+                const currentStatus = (sheet.getRange(rowLog, 11).getValue() || "").toString().trim().toUpperCase();
+
+                // IDEMPOTENCY GUARD: Cegah pengiriman pesan berulang jika laporan sudah Selesai/Ditolak
+                if (currentStatus === "SELESAI" || currentStatus === "DITOLAK") {
+                    console.warn(`[REPLY Guard] Baris ${rowLog} pada Sheet ${isDev ? 'DEV' : 'PROD'} sudah berstatus '${currentStatus}'. Membatalkan pengiriman pesan berulang.`);
+                    statusLog = "SKIPPED_ALREADY_PROCESSED";
+                    detailLog = `Laporan sudah berstatus ${currentStatus}, pengiriman pesan berulang dibatalkan.`;
+                    return;
+                }
 
                 console.log(`[REPLY] Processing ${jenis} for row ${rowLog}, ticket: ${idTicket} (isDev: ${isDev})`);
 
