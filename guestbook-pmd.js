@@ -451,47 +451,6 @@ function handleWhatsAppWebhook(data, rawData) {
     return ContentService.createTextOutput("OK");
 }
 
-// function doPost(e) {
-//   try {
-//     if (!e?.postData?.contents) {
-//       return ContentService.createTextOutput("OK");
-//     }
-
-//     const rawData = e.postData.contents;
-//     const data = JSON.parse(rawData);
-//     const updateId = data.update_id;
-
-//     const cache = PropertiesService.getScriptProperties();
-
-//     if (cache.getProperty("processed_" + updateId)) {
-//       return ContentService.createTextOutput("OK");
-//     }
-
-//     cache.setProperty("processed_" + updateId, "true");
-
-//     if (data.callback_query) {
-//       UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/answerCallbackQuery`, {
-//         method: 'post',
-//         contentType: 'application/json',
-//         muteHttpExceptions: true,
-//         payload: JSON.stringify({ callback_query_id: data.callback_query.id, text: "Memproses..." })
-//       });
-//     }
-
-//     // Simpan untuk diproses
-//     cache.setProperty("pending_" + updateId, rawData);
-
-//     // Proses di fungsi terpisah
-//     prosesPendingUpdate(updateId);
-
-//     return ContentService.createTextOutput("OK");
-
-//   } catch (err) {
-//     console.error("doPost Error:", err);
-//     return ContentService.createTextOutput("OK");
-//   }
-// }
-
 function prosesPencarianTiket(userPhone, ticketId) {
     const sheet = SpreadsheetApp.openById(SPREADSHEET_ID);
     const data = sheet.getDataRange().getValues();
@@ -599,38 +558,12 @@ function prosesPendingWhatsAppUpdate(waUniqueId, data) {
 function detectIsDev(data) {
     const isCallback = !!data.callback_query;
     const isReply = !isCallback && data.message && data.message.reply_to_message;
-
-    // 1. Callback: cek prefix DEV_
-    if (isCallback) {
-        if (data.callback_query.data && data.callback_query.data.startsWith("DEV_")) {
-            return true;
-        }
-    }
-
-    // 2. Reply: cek tag _DEV di teks yang di-reply
+    if (isCallback && data.callback_query.data && data.callback_query.data.startsWith("DEV_")) return true;
     if (isReply) {
         const repliedText = data.message.reply_to_message.text || "";
-        if (repliedText.includes("_DEV")) {
-            return true;
-        }
+        if (repliedText.includes("_DEV")) return true;
     }
-
     return false;
-}
-
-function verifySheetTarget(row, ticketIdFromTelegram) {
-    if (!ticketIdFromTelegram || !DEV_SPREADSHEET_ID || DEV_SPREADSHEET_ID.includes("xx-")) return false;
-    try {
-        const ssProd = SpreadsheetApp.openById(SPREADSHEET_ID);
-        const sheetProd = ssProd.getSheetByName(NAMA_TAB_UTAMA);
-        if (sheetProd) {
-            const prodTicket = (sheetProd.getRange(row, 10).getValue() || "").toString().trim();
-            if (prodTicket.toUpperCase() === ticketIdFromTelegram.toUpperCase()) {
-                return false; // Cocok di PROD, tidak perlu ke DEV
-            }
-        }
-    } catch (e) { /* abaikan */ }
-    return true; // Tidak cocok di PROD → kemungkinan DEV
 }
 
 function prosesPendingUpdate(updateId, data) {
@@ -646,33 +579,43 @@ function prosesPendingUpdate(updateId, data) {
 
         let isDev = detectIsDev(data);
 
-        // Untuk callback tanpa prefix DEV_, verifikasi ringan via row + ticket match
-        if (!isDev && isCallback) {
-            const cq = data.callback_query;
-            let cbData = cq.data || "";
-            const parts = cbData.split('_');
-            const rowNum = parseInt(parts[parts.length - 1]);
-            const msgText = cq.message ? cq.message.text || "" : "";
-            const matchTiket = msgText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
-            if (matchTiket && !isNaN(rowNum) && rowNum >= 2) {
-                isDev = verifySheetTarget(rowNum, matchTiket[0]);
-            }
-        }
-
-        // Untuk reply tanpa tag _DEV, verifikasi ringan
-        if (!isDev && isReply) {
-            const repliedText = data.message.reply_to_message.text || "";
-            const matchRow = repliedText.match(/#ROW_(\d+)_/);
-            const matchTiket = repliedText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
-            if (matchRow && matchTiket) {
-                isDev = verifySheetTarget(parseInt(matchRow[1]), matchTiket[0]);
-            }
-        }
-
-        const targetSpreadsheetId = isDev ? DEV_SPREADSHEET_ID : SPREADSHEET_ID;
-        const ss = SpreadsheetApp.openById(targetSpreadsheetId);
-        const sheet = ss.getSheetByName(NAMA_TAB_UTAMA);
+        let targetSpreadsheetId = isDev ? DEV_SPREADSHEET_ID : SPREADSHEET_ID;
+        let ss = SpreadsheetApp.openById(targetSpreadsheetId);
+        let sheet = ss.getSheetByName(NAMA_TAB_UTAMA);
         if (!sheet) throw new Error("Sheet utama tidak ditemukan");
+
+        if (!isDev && DEV_SPREADSHEET_ID && !DEV_SPREADSHEET_ID.includes("xx-")) {
+            let ticketFromMsg = null;
+            let rowToCheck = null;
+
+            if (isCallback) {
+                const cq = data.callback_query;
+                const msgText = cq.message ? cq.message.text || "" : "";
+                const matchT = msgText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
+                ticketFromMsg = matchT ? matchT[0] : null;
+                const parts = (cq.data || "").split('_');
+                rowToCheck = parseInt(parts[parts.length - 1]);
+            } else if (isReply) {
+                const repliedText = data.message.reply_to_message.text || "";
+                const matchT = repliedText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
+                ticketFromMsg = matchT ? matchT[0] : null;
+                const matchR = repliedText.match(/#ROW_(\d+)_/);
+                rowToCheck = matchR ? parseInt(matchR[1]) : null;
+            }
+
+            if (ticketFromMsg && rowToCheck && rowToCheck >= 2) {
+                const prodTicket = (sheet.getRange(rowToCheck, 10).getValue() || "").toString().trim();
+                if (prodTicket.toUpperCase() !== ticketFromMsg.toUpperCase()) {
+                    // Tidak cocok di PROD → switch ke DEV
+                    isDev = true;
+                    targetSpreadsheetId = DEV_SPREADSHEET_ID;
+                    ss = SpreadsheetApp.openById(targetSpreadsheetId);
+                    sheet = ss.getSheetByName(NAMA_TAB_UTAMA);
+                    if (!sheet) throw new Error("Sheet DEV tidak ditemukan");
+                    console.log(`[Inline DEV Switch] Tiket ${ticketFromMsg} tidak ditemukan di PROD row ${rowToCheck}, switch ke DEV.`);
+                }
+            }
+        }
 
         const mapBidang = {
             "SEK": "Bidang Sekretariat",
@@ -690,8 +633,8 @@ function prosesPendingUpdate(updateId, data) {
                 callbackData = callbackData.substring(4);
             }
             const parts = callbackData.split('_');
-            aksiLog = parts[0];
-            rowLog = parseInt(parts[parts.length - 1]);
+            const aksiLog = parts[0];
+            const rowLog = parseInt(parts[parts.length - 1]);
 
             console.log(`[CALLBACK] Processing callbackData: ${cq.data} (isDev: ${isDev})`);
 
@@ -929,10 +872,37 @@ function doGet(e) {
 }
 
 function webhookTelegramCheck() {
-    const token = TELEBOT_TOKEN;
-    const url = `https://api.telegram.org/bot${token}/getWebhookInfo`;
+    const url = `https://api.telegram.org/bot${TELEBOT_TOKEN}/getWebhookInfo`;
     const response = UrlFetchApp.fetch(url);
     console.log(response.getContentText());
+}
+
+function resetPendingUpdates() {
+    const url = `https://api.telegram.org/bot${TELEBOT_TOKEN}/setWebhook`;
+    const webhookUrl = ScriptApp.getService().getUrl();
+    const response = UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({
+            url: webhookUrl,
+            drop_pending_updates: true
+        })
+    });
+    console.log("Reset pending updates: " + response.getContentText());
+    webhookTelegramCheck();
+}
+
+function cleanupOldProperties() {
+    const props = PropertiesService.getScriptProperties();
+    const allProps = props.getProperties();
+    let deleted = 0;
+    for (const key in allProps) {
+        if (key.startsWith("processed_") || key.startsWith("pending_") || key.startsWith("processed_tg_")) {
+            props.deleteProperty(key);
+            deleted++;
+        }
+    }
+    console.log(`Berhasil membersihkan ${deleted} properties lama.`);
 }
 
 function deactivateTelegramWebhook() {
