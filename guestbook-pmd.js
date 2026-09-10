@@ -9,6 +9,7 @@ const WA_ACCESS_TOKEN = "xxxx";
 const WA_TEMPLATE_NAME = "notifikasi_tiket";
 const WA_WEBHOOK_VERIFY_TOKEN = "xxxx";
 const SKM_URL = "xx";
+const WEBAPP_EXEC_URL = "https://script.google.com/macros/s/AKfycbyWzBMUlKNwPyil99TQh1B9UlbwGa3OHMdvKqdoHcsYYpc5Knxz5n3viDGwVj-dvlXP/exec";
 
 function default_keyboard(row, isDev = false) {
     const prefix = isDev ? "DEV_" : "";
@@ -339,14 +340,6 @@ function formatNomorWA(phone) {
 //   Logger.log(response.getContentText());
 // }
 
-function activateTelegramWebhook() {
-    const token = TELEBOT_TOKEN;
-    const urlWebApp = 'https://script.google.com/macros/s/AKfycbyWzBMUlKNwPyil99TQh1B9UlbwGa3OHMdvKqdoHcsYYpc5Knxz5n3viDGwVj-dvlXP/exec';
-
-    const url = `https://api.telegram.org/bot${token}/setWebhook?url=${urlWebApp}&drop_pending_updates=true`;
-    const response = UrlFetchApp.fetch(url);
-    Logger.log(response.getContentText());
-}
 
 function doPost(e) {
     try {
@@ -579,43 +572,25 @@ function prosesPendingUpdate(updateId, data) {
 
         let isDev = detectIsDev(data);
 
-        let targetSpreadsheetId = isDev ? DEV_SPREADSHEET_ID : SPREADSHEET_ID;
-        let ss = SpreadsheetApp.openById(targetSpreadsheetId);
-        let sheet = ss.getSheetByName(NAMA_TAB_UTAMA);
-        if (!sheet) throw new Error("Sheet utama tidak ditemukan");
-
-        if (!isDev && DEV_SPREADSHEET_ID && !DEV_SPREADSHEET_ID.includes("xx-")) {
-            let ticketFromMsg = null;
-            let rowToCheck = null;
-
-            if (isCallback) {
-                const cq = data.callback_query;
-                const msgText = cq.message ? cq.message.text || "" : "";
-                const matchT = msgText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
-                ticketFromMsg = matchT ? matchT[0] : null;
-                const parts = (cq.data || "").split('_');
-                rowToCheck = parseInt(parts[parts.length - 1]);
-            } else if (isReply) {
-                const repliedText = data.message.reply_to_message.text || "";
-                const matchT = repliedText.match(/PMD-\d{8}-\d+-[A-Z0-9]+/i);
-                ticketFromMsg = matchT ? matchT[0] : null;
-                const matchR = repliedText.match(/#ROW_(\d+)_/);
-                rowToCheck = matchR ? parseInt(matchR[1]) : null;
+        // Deteksi tambahan ringan TANPA membuka spreadsheet:
+        // Cek apakah teks pesan Telegram mengandung tanda data DEV ([TEST] atau DEV-)
+        if (!isDev) {
+            let msgText = "";
+            if (isCallback && data.callback_query.message) {
+                msgText = data.callback_query.message.text || "";
+            } else if (isReply && data.message.reply_to_message) {
+                msgText = data.message.reply_to_message.text || "";
             }
-
-            if (ticketFromMsg && rowToCheck && rowToCheck >= 2) {
-                const prodTicket = (sheet.getRange(rowToCheck, 10).getValue() || "").toString().trim();
-                if (prodTicket.toUpperCase() !== ticketFromMsg.toUpperCase()) {
-                    // Tidak cocok di PROD → switch ke DEV
-                    isDev = true;
-                    targetSpreadsheetId = DEV_SPREADSHEET_ID;
-                    ss = SpreadsheetApp.openById(targetSpreadsheetId);
-                    sheet = ss.getSheetByName(NAMA_TAB_UTAMA);
-                    if (!sheet) throw new Error("Sheet DEV tidak ditemukan");
-                    console.log(`[Inline DEV Switch] Tiket ${ticketFromMsg} tidak ditemukan di PROD row ${rowToCheck}, switch ke DEV.`);
-                }
+            if (msgText.includes("[TEST]") || msgText.includes("DEV-")) {
+                isDev = true;
+                console.log("[Lightweight DEV Detection] Teks pesan mengandung marker DEV.");
             }
         }
+
+        const targetSpreadsheetId = isDev ? DEV_SPREADSHEET_ID : SPREADSHEET_ID;
+        const ss = SpreadsheetApp.openById(targetSpreadsheetId);
+        const sheet = ss.getSheetByName(NAMA_TAB_UTAMA);
+        if (!sheet) throw new Error("Sheet utama tidak ditemukan");
 
         const mapBidang = {
             "SEK": "Bidang Sekretariat",
@@ -755,81 +730,95 @@ function prosesPendingUpdate(updateId, data) {
 
                 const teksBalasan = data.message.text;
                 const pengisi = data.message.from.first_name;
-                const idTicket = sheet.getRange(rowLog, 10).getValue() || "";
-                const bidangPJ = sheet.getRange(rowLog, 12).getValue() || "";
                 const chatId = data.message.chat.id;
 
-                const currentStatus = (sheet.getRange(rowLog, 11).getValue() || "").toString().trim().toUpperCase();
+                // Batch read: ambil kolom J(10), K(11), L(12), O(15) sekaligus dalam 1 panggilan
+                const rowData = sheet.getRange(rowLog, 1, 1, 15).getValues()[0];
+                const idTicket = rowData[9] || "";   // Kolom J (10)
+                const currentStatus = (rowData[10] || "").toString().trim().toUpperCase(); // Kolom K (11)
+                const bidangPJ = rowData[11] || "";  // Kolom L (12)
+                const noWaRaw = rowData[3] || "";    // Kolom D (4)
+                const telegramMsgIdInSheet = rowData[14] || ""; // Kolom O (15)
 
-                // IDEMPOTENCY GUARD: Cegah pengiriman pesan berulang jika laporan sudah Selesai/Ditolak
+                // IDEMPOTENCY GUARD
                 if (currentStatus === "SELESAI" || currentStatus === "DITOLAK") {
-                    console.warn(`[REPLY Guard] Baris ${rowLog} pada Sheet ${isDev ? 'DEV' : 'PROD'} sudah berstatus '${currentStatus}'. Membatalkan pengiriman pesan berulang.`);
+                    console.warn(`[REPLY Guard] Baris ${rowLog} sudah '${currentStatus}'. Skip.`);
                     statusLog = "SKIPPED_ALREADY_PROCESSED";
-                    detailLog = `Laporan sudah berstatus ${currentStatus}, pengiriman pesan berulang dibatalkan.`;
+                    detailLog = `Laporan sudah berstatus ${currentStatus}`;
                     return;
                 }
 
                 console.log(`[REPLY] Processing ${jenis} for row ${rowLog}, ticket: ${idTicket} (isDev: ${isDev})`);
 
-                if (jenis === "TOLAK") {
-                    sheet.getRange(rowLog, 11).setValue("Ditolak");
-                    sheet.getRange(rowLog, 13).setValue(teksBalasan);
+                // Batch write: tulis status + catatan sekaligus
+                const statusBaru = jenis === "TOLAK" ? "Ditolak" : "Selesai";
+                sheet.getRange(rowLog, 11).setValue(statusBaru);
+                sheet.getRange(rowLog, 13).setValue(teksBalasan);
 
-                } else if (jenis === "SELESAI") {
-                    sheet.getRange(rowLog, 11).setValue("Selesai");
-                    sheet.getRange(rowLog, 13).setValue(teksBalasan);
+                // Kirim WA jika SELESAI
+                if (jenis === "SELESAI" && noWaRaw && noWaRaw !== "KOSONG" && noWaRaw !== "") {
+                    const noWaBersih = formatNomorWA(noWaRaw);
+                    const pesanSelesai =
+                        `Halo Bapak/Ibu,
 
-                    const colIndexTiket = 10;
-                    const colIndexWA = 4;
-
-                    const idTiket = sheet.getRange(rowLog, colIndexTiket).getValue();
-                    const noWaRaw = sheet.getRange(rowLog, colIndexWA).getValue();
-
-                    if (noWaRaw && noWaRaw !== "KOSONG" && noWaRaw !== "") {
-                        const noWaBersih = formatNomorWA(noWaRaw);
-                        const pesanSelesai =
-                            `Halo Bapak/Ibu,
-
-        Kami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTiket}* telah *SELESAI* ditindaklanjuti.
+        Kami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTicket}* telah *SELESAI* ditindaklanjuti.
 
         Sebagai upaya peningkatan kualitas pelayanan publik, silakan Bapak/Ibu mengisi Survei Kepuasan Masyarakat (SKM) melalui tautan berikut:
         🔗 ${SKM_URL}
 
         Setelah mengisi survei tersebut, Anda dapat melihat detail penyelesaian dengan mengetik:
-        *CEK ${idTiket}*
+        *CEK ${idTicket}*
 
         Terima kasih atas partisipasi Anda telah menggunakan SI Buku Tamu Online DPMD Kabupaten Muara Enim. 🙏`;
-                        kirimWaTeksBiasa(noWaBersih, pesanSelesai);
-                        console.log(`[Telegram Trigger] Notifikasi Selesai & SKM berhasil dikirim ke WA: ${noWaBersih}`);
-
-                    } else {
-                        console.warn(`[Telegram Trigger] Tiket ${idTiket} diselesaikan, namun nomor WA pengguna tidak ditemukan.`);
-                    }
+                    kirimWaTeksBiasa(noWaBersih, pesanSelesai);
                 }
 
-                // Perbarui pesan Telegram utama agar menampilkan status Selesai/Ditolak beserta alasannya
-                const telegramMsgIdInSheet = sheet.getRange(rowLog, 15).getValue();
+                // === Batch Telegram API calls (PARALEL) ===
                 const targetMsgId = telegramMsgIdInSheet || originalMessageId;
-                syncEditToTelegram(targetMsgId, jenis === "TOLAK" ? "Ditolak" : "Selesai", bidangPJ, teksBalasan, idTicket, rowLog, isDev);
+                const statusUpper = statusBaru.toUpperCase();
+                let syncText = "";
+                if (statusUpper === "DITOLAK") {
+                    syncText = `❌ *LAPORAN DITOLAK*\n🎫 Tiket: ${idTicket}\n📝 Alasan: ${teksBalasan}\n\n_Pesan ini telah difinalisasi._`;
+                } else if (statusUpper === "SELESAI") {
+                    syncText = `✅ *LAPORAN SELESAI*\n🎫 Tiket: ${idTicket}\n🏢 Bidang: ${bidangPJ}\n📝 Catatan: ${teksBalasan}\n\n_Pesan ini telah difinalisasi._`;
+                }
 
-                try {
-                    const hideRes = UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageReplyMarkup`, {
+                const telegramBaseUrl = `https://api.telegram.org/bot${TELEBOT_TOKEN}`;
+                const requests = [];
+
+                // 1. Update pesan utama (syncEditToTelegram inline)
+                if (syncText) {
+                    requests.push({
+                        url: `${telegramBaseUrl}/editMessageText`,
                         method: 'post',
                         contentType: 'application/json',
                         muteHttpExceptions: true,
                         payload: JSON.stringify({
-                            chat_id: chatId,
-                            message_id: originalMessageId,
+                            chat_id: TELEGROUP_ID,
+                            message_id: targetMsgId,
+                            text: syncText,
+                            parse_mode: 'Markdown',
                             reply_markup: { inline_keyboard: [] }
                         })
                     });
-                    console.log(`Hide markup result: ${hideRes.getResponseCode()}`);
-                } catch (err) {
-                    console.error("Error hiding markup:", err);
                 }
 
-                // Konfirmasi ke Grup Telegram
-                UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/sendMessage`, {
+                // 2. Sembunyikan markup pesan reply instruksi
+                requests.push({
+                    url: `${telegramBaseUrl}/editMessageReplyMarkup`,
+                    method: 'post',
+                    contentType: 'application/json',
+                    muteHttpExceptions: true,
+                    payload: JSON.stringify({
+                        chat_id: chatId,
+                        message_id: originalMessageId,
+                        reply_markup: { inline_keyboard: [] }
+                    })
+                });
+
+                // 3. Kirim konfirmasi ke grup
+                requests.push({
+                    url: `${telegramBaseUrl}/sendMessage`,
                     method: 'post',
                     contentType: 'application/json',
                     muteHttpExceptions: true,
@@ -839,6 +828,9 @@ function prosesPendingUpdate(updateId, data) {
                         parse_mode: "Markdown"
                     })
                 });
+
+                // Kirim semua request Telegram secara PARALEL
+                UrlFetchApp.fetchAll(requests);
 
                 statusLog = "SUCCESS";
                 detailLog = `Laporan berhasil ${jenis === "TOLAK" ? "DITOLAK" : "DISELESAIKAN"} oleh ${pengisi}`;
@@ -877,9 +869,44 @@ function webhookTelegramCheck() {
     console.log(response.getContentText());
 }
 
-function resetPendingUpdates() {
+function _getExecUrl() {
+    let url = WEBAPP_EXEC_URL;
+    if (!url || url === "") {
+        url = ScriptApp.getService().getUrl();
+    }
+    if (url.endsWith("/dev")) {
+        throw new Error(
+            "❌ GAGAL: URL webhook mengarah ke /dev (development)!\n" +
+            "Telegram TIDAK BISA mengakses URL /dev.\n\n" +
+            "SOLUSI:\n" +
+            "1. Buka Deploy > Manage deployments\n" +
+            "2. Salin URL deployment yang berakhiran /exec\n" +
+            "3. Tempel ke konstanta WEBAPP_EXEC_URL di baris atas kode\n" +
+            "4. Simpan & jalankan ulang fungsi ini"
+        );
+    }
+    return url;
+}
+
+function activateTelegramWebhook() {
+    const webhookUrl = _getExecUrl();
     const url = `https://api.telegram.org/bot${TELEBOT_TOKEN}/setWebhook`;
-    const webhookUrl = ScriptApp.getService().getUrl();
+    const response = UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({
+            url: webhookUrl,
+            drop_pending_updates: true
+        })
+    });
+    console.log("Activate webhook result: " + response.getContentText());
+    console.log("Webhook URL: " + webhookUrl);
+    webhookTelegramCheck();
+}
+
+function resetPendingUpdates() {
+    const webhookUrl = _getExecUrl();
+    const url = `https://api.telegram.org/bot${TELEBOT_TOKEN}/setWebhook`;
     const response = UrlFetchApp.fetch(url, {
         method: 'post',
         contentType: 'application/json',
@@ -906,8 +933,7 @@ function cleanupOldProperties() {
 }
 
 function deactivateTelegramWebhook() {
-    const token = TELEBOT_TOKEN;
-    const url = `https://api.telegram.org/bot${token}/setWebhook?url=`;
+    const url = `https://api.telegram.org/bot${TELEBOT_TOKEN}/setWebhook?url=`;
     const response = UrlFetchApp.fetch(url);
     console.log(response.getContentText());
 }
@@ -961,10 +987,6 @@ function runTestTelgramReply() {
     console.log("--- TES SELESAI --- Kunjungi Spreadsheet Anda untuk cek Baris 10 Kolom K & M");
 }
 
-/**
- * Handler Installable Trigger - dipanggil otomatis setiap kali Admin mengedit sel di Spreadsheet.
- * Kolom yang diawasi: K (11) = Status, L (12) = Bidang PJ, M (13) = Catatan/Ulasan.
- */
 function onSpreadsheetEdit(e) {
     try {
         if (!e || !e.range) return;
@@ -1036,9 +1058,6 @@ function onSpreadsheetEdit(e) {
     }
 }
 
-/**
- * Memperbarui teks dan tombol inline pesan Telegram asli sesuai kondisi terbaru dari Sheet.
- */
 function syncEditToTelegram(messageId, status, bidang, catatan, idTicket, row, isDev = false) {
     const statusUpper = status.toUpperCase();
     let text = "";
@@ -1091,9 +1110,6 @@ function syncEditToTelegram(messageId, status, bidang, catatan, idTicket, row, i
     console.log(`[syncEditToTelegram] Response Telegram untuk MsgID ${messageId}: ${res.getResponseCode()}`);
 }
 
-/**
- * Fungsi pembantu untuk memasang trigger onSpreadsheetEdit pada spreadsheet PROD dan DEV.
- */
 function setupOnEditTrigger() {
     // 1. Pasang Trigger untuk Spreadsheet Produksi
     try {
