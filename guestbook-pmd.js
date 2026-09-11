@@ -378,12 +378,37 @@ function handleTelegramWebhook(data, rawData) {
     cache.put(cacheKey, "1", 21600); // 6 jam
 
     if (data.callback_query) {
+        const cq = data.callback_query;
+        const msgId = cq.message ? cq.message.message_id : "";
+        const chatId = cq.message ? cq.message.chat.id : "";
+        const lockKey = `lock_cb_${chatId}_${msgId}`;
+
+        if (cache.get(lockKey)) {
+            console.warn(`[Debounce Guard] Menolak klik beruntun pada pesan ${msgId}.`);
+            try {
+                UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/answerCallbackQuery`, {
+                    method: 'post',
+                    contentType: 'application/json',
+                    muteHttpExceptions: true,
+                    payload: JSON.stringify({
+                        callback_query_id: cq.id,
+                        text: "⏳ Sedang diproses, mohon tunggu sebentar...",
+                        show_alert: false
+                    })
+                });
+            } catch (e) { /* abaikan */ }
+            return ContentService.createTextOutput("OK");
+        }
+
+        // Pasang lock selama 6 detik untuk menahan request ganda
+        cache.put(lockKey, "1", 6);
+
         try {
             UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/answerCallbackQuery`, {
                 method: 'post',
                 contentType: 'application/json',
                 muteHttpExceptions: true,
-                payload: JSON.stringify({ callback_query_id: data.callback_query.id, text: "Memproses..." })
+                payload: JSON.stringify({ callback_query_id: cq.id, text: "Memproses..." })
             });
         } catch (e) { /* abaikan */ }
     }
@@ -572,8 +597,6 @@ function prosesPendingUpdate(updateId, data) {
 
         let isDev = detectIsDev(data);
 
-        // Deteksi tambahan ringan TANPA membuka spreadsheet:
-        // Cek apakah teks pesan Telegram mengandung tanda data DEV ([TEST] atau DEV-)
         if (!isDev) {
             let msgText = "";
             if (isCallback && data.callback_query.message) {
@@ -587,10 +610,16 @@ function prosesPendingUpdate(updateId, data) {
             }
         }
 
-        const targetSpreadsheetId = isDev ? DEV_SPREADSHEET_ID : SPREADSHEET_ID;
-        const ss = SpreadsheetApp.openById(targetSpreadsheetId);
-        const sheet = ss.getSheetByName(NAMA_TAB_UTAMA);
-        if (!sheet) throw new Error("Sheet utama tidak ditemukan");
+        let _sheet = null;
+        function getSheet() {
+            if (!_sheet) {
+                const targetSpreadsheetId = isDev ? DEV_SPREADSHEET_ID : SPREADSHEET_ID;
+                const ss = SpreadsheetApp.openById(targetSpreadsheetId);
+                _sheet = ss.getSheetByName(NAMA_TAB_UTAMA);
+                if (!_sheet) throw new Error("Sheet utama tidak ditemukan");
+            }
+            return _sheet;
+        }
 
         const mapBidang = {
             "SEK": "Bidang Sekretariat",
@@ -617,8 +646,13 @@ function prosesPendingUpdate(updateId, data) {
 
             // ==================== BATAL ====================
             if (aksiLog === "BATAL") {
-                sheet.getRange(rowLog, 11).setValue("Menunggu Tindakan");
-                sheet.getRange(rowLog, 12).setValue("");
+                // Hapus lock agar tombol bidang bisa diklik kembali jika dibatalkan
+                const cache = CacheService.getScriptCache();
+                const msgId = cq.message ? cq.message.message_id : "";
+                const chatId = cq.message ? cq.message.chat.id : "";
+                cache.remove(`lock_cb_${chatId}_${msgId}`);
+
+                getSheet().getRange(rowLog, 11, 1, 2).setValues([["Menunggu Tindakan", ""]]);
                 UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageReplyMarkup`, {
                     method: 'post', contentType: 'application/json', muteHttpExceptions: true,
                     payload: JSON.stringify({
@@ -636,11 +670,17 @@ function prosesPendingUpdate(updateId, data) {
             if (aksiLog === "PROSES") {
                 const bidangCode = parts[1];
                 const namaBidang = mapBidang[bidangCode] || bidangCode;
+                const msgText = cq.message ? cq.message.text || "" : "";
 
-                sheet.getRange(rowLog, 11).setValue("Diproses");
-                sheet.getRange(rowLog, 12).setValue(namaBidang);
+                // GUARD: Jika pesan sudah berstatus 'Diproses', 'Selesai', atau 'Ditolak', skip!
+                if (msgText.includes("STATUS: Diproses") || msgText.includes("STATUS: Selesai") || msgText.includes("STATUS: Ditolak")) {
+                    console.warn(`[PROSES Guard] Pesan ${cq.message.message_id} sudah diproses sebelumnya. Skip.`);
+                    statusLog = "SKIPPED_ALREADY_PROCESSED";
+                    detailLog = "Bidang sudah dipilih sebelumnya";
+                    return;
+                }
 
-                const pesanUpdate = `${cq.message.text}\n\n✅ *STATUS: Diproses*\nOleh: ${namaBidang}\nPetugas: ${cq.from.first_name}`;
+                const pesanUpdate = `${msgText}\n\n✅ *STATUS: Diproses*\nOleh: ${namaBidang}\nPetugas: ${cq.from.first_name}`;
                 const devPrefix = isDev ? "DEV_" : "";
 
                 const keyboard = {
@@ -650,6 +690,7 @@ function prosesPendingUpdate(updateId, data) {
                     ]
                 };
 
+                // Update tampilan Telegram TERLEBIH DAHULU agar respon terasa instan di UI admin (<300ms)
                 UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageText`, {
                     method: 'post', contentType: 'application/json', muteHttpExceptions: true,
                     payload: JSON.stringify({
@@ -661,20 +702,31 @@ function prosesPendingUpdate(updateId, data) {
                     })
                 });
 
+                // Tulis ke Spreadsheet setelah tampilan Telegram ter-update
+                getSheet().getRange(rowLog, 11, 1, 2).setValues([["Diproses", namaBidang]]);
+
                 statusLog = "SUCCESS";
                 detailLog = `Diproses oleh ${namaBidang}`;
             }
 
             // ==================== TANYA (Tolak / Selesai) ====================
             else if (aksiLog === "TANYA") {
-                const jenis = parts[1];
+                const jenis = parts[1]; // "SELESAI" atau "TOLAK"
                 const rowStr = parts[2];
-                const idTicket = sheet.getRange(parseInt(rowStr), 10).getValue() || "Unknown";
+
+                // Optimasi Cerdas: Ambil idTicket langsung dari cq.message.text (TANPA perlu I/O ke Spreadsheet!)
+                let idTicket = "Unknown";
+                const matchTicket = (cq.message.text || "").match(/ID Tiket:\s*([^\s\n]+)/i);
+                if (matchTicket) {
+                    idTicket = matchTicket[1].trim();
+                }
+
                 const kataTugas = jenis === "TOLAK" ? "alasan penolakan" : "catatan penyelesaian";
                 const username = cq.from.username ? "@" + cq.from.username : cq.from.first_name;
                 const originalMessageId = cq.message.message_id;
 
-                const pesanUpdate = `${cq.message.text}\n\n✅ *STATUS: Ditolak*\nOleh: ${username}\n`;
+                const labelStatus = jenis === "TOLAK" ? "Menunggu Alasan Penolakan" : "Menunggu Catatan Penyelesaian";
+                const pesanUpdate = `${cq.message.text}\n\n⏳ *STATUS: ${labelStatus}*\nOleh: ${username}`;
                 const devPrefix = isDev ? "DEV_" : "";
 
                 const keyboard = {
@@ -683,30 +735,36 @@ function prosesPendingUpdate(updateId, data) {
                     ]
                 };
 
-                UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageText`, {
-                    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-                    payload: JSON.stringify({
-                        chat_id: cq.message.chat.id,
-                        message_id: cq.message.message_id,
-                        text: pesanUpdate,
-                        parse_mode: 'Markdown',
-                        reply_markup: keyboard
-                    })
-                });
-
                 const devTag = isDev ? "_DEV" : "";
                 const replyMsg = `[#ROW_${rowStr}_${jenis}${devTag}] [#MAIN_${originalMessageId}] ${username}, silakan balas (reply) pesan ini dengan *${kataTugas}* untuk laporan ini.\nTiket: ${idTicket}`;
 
-                UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/sendMessage`, {
-                    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-                    payload: JSON.stringify({
-                        chat_id: TELEGROUP_ID,
-                        text: replyMsg,
-                        parse_mode: 'Markdown',
-                        reply_to_message_id: originalMessageId,
-                        reply_markup: { force_reply: true, selective: true }
-                    })
-                });
+                const telegramBaseUrl = `https://api.telegram.org/bot${TELEBOT_TOKEN}`;
+
+                // Batching paralel request ke Telegram (edit pesan + sendMessage instruksi reply)
+                UrlFetchApp.fetchAll([
+                    {
+                        url: `${telegramBaseUrl}/editMessageText`,
+                        method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+                        payload: JSON.stringify({
+                            chat_id: cq.message.chat.id,
+                            message_id: cq.message.message_id,
+                            text: pesanUpdate,
+                            parse_mode: 'Markdown',
+                            reply_markup: keyboard
+                        })
+                    },
+                    {
+                        url: `${telegramBaseUrl}/sendMessage`,
+                        method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+                        payload: JSON.stringify({
+                            chat_id: TELEGROUP_ID,
+                            text: replyMsg,
+                            parse_mode: 'Markdown',
+                            reply_to_message_id: originalMessageId,
+                            reply_markup: { force_reply: true, selective: true }
+                        })
+                    }
+                ]);
 
                 statusLog = "SUCCESS";
                 detailLog = `Instruksi ${jenis} dikirim | MAIN_ID: ${originalMessageId}`;
@@ -732,6 +790,8 @@ function prosesPendingUpdate(updateId, data) {
                 const pengisi = data.message.from.first_name;
                 const chatId = data.message.chat.id;
 
+                const sheet = getSheet();
+
                 // Batch read: ambil kolom J(10), K(11), L(12), O(15) sekaligus dalam 1 panggilan
                 const rowData = sheet.getRange(rowLog, 1, 1, 15).getValues()[0];
                 const idTicket = rowData[9] || "";   // Kolom J (10)
@@ -750,30 +810,36 @@ function prosesPendingUpdate(updateId, data) {
 
                 console.log(`[REPLY] Processing ${jenis} for row ${rowLog}, ticket: ${idTicket} (isDev: ${isDev})`);
 
-                // Batch write: tulis status + catatan sekaligus
                 const statusBaru = jenis === "TOLAK" ? "Ditolak" : "Selesai";
-                sheet.getRange(rowLog, 11).setValue(statusBaru);
-                sheet.getRange(rowLog, 13).setValue(teksBalasan);
 
-                // Kirim WA jika SELESAI
+                // Batch write status (11), bidang (12), dan catatan (13) sekaligus dalam 1 panggilan API
+                sheet.getRange(rowLog, 11, 1, 3).setValues([[statusBaru, bidangPJ, teksBalasan]]);
+
+                const requests = [];
+
+                // Push WhatsApp API call ke array request paralel jika SELESAI
                 if (jenis === "SELESAI" && noWaRaw && noWaRaw !== "KOSONG" && noWaRaw !== "") {
                     const noWaBersih = formatNomorWA(noWaRaw);
                     const pesanSelesai =
-                        `Halo Bapak/Ibu,
+                        `Halo Bapak/Ibu,\n\nKami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTicket}* telah *SELESAI* ditindaklanjuti.\n\nSebagai upaya peningkatan kualitas pelayanan publik, silakan Bapak/Ibu mengisi Survei Kepuasan Masyarakat (SKM) melalui tautan berikut:\n🔗 ${SKM_URL}\n\nSetelah mengisi survei tersebut, Anda dapat melihat detail penyelesaian dengan mengetik:\n*CEK ${idTicket}*\n\nTerima kasih atas partisipasi Anda telah menggunakan SI Buku Tamu Online DPMD Kabupaten Muara Enim. 🙏`;
 
-        Kami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTicket}* telah *SELESAI* ditindaklanjuti.
-
-        Sebagai upaya peningkatan kualitas pelayanan publik, silakan Bapak/Ibu mengisi Survei Kepuasan Masyarakat (SKM) melalui tautan berikut:
-        🔗 ${SKM_URL}
-
-        Setelah mengisi survei tersebut, Anda dapat melihat detail penyelesaian dengan mengetik:
-        *CEK ${idTicket}*
-
-        Terima kasih atas partisipasi Anda telah menggunakan SI Buku Tamu Online DPMD Kabupaten Muara Enim. 🙏`;
-                    kirimWaTeksBiasa(noWaBersih, pesanSelesai);
+                    requests.push({
+                        url: `https://graph.facebook.com/v25.0/${WA_PHONE_NUMBER_ID}/messages`,
+                        method: 'post',
+                        contentType: 'application/json',
+                        headers: { "Authorization": "Bearer " + WA_ACCESS_TOKEN },
+                        payload: JSON.stringify({
+                            "messaging_product": "whatsapp",
+                            "recipient_type": "individual",
+                            "to": noWaBersih,
+                            "type": "text",
+                            "text": { "preview_url": true, "body": pesanSelesai }
+                        }),
+                        muteHttpExceptions: true
+                    });
                 }
 
-                // === Batch Telegram API calls (PARALEL) ===
+                // === Batch Telegram API calls ===
                 const targetMsgId = telegramMsgIdInSheet || originalMessageId;
                 const statusUpper = statusBaru.toUpperCase();
                 let syncText = "";
@@ -784,9 +850,8 @@ function prosesPendingUpdate(updateId, data) {
                 }
 
                 const telegramBaseUrl = `https://api.telegram.org/bot${TELEBOT_TOKEN}`;
-                const requests = [];
 
-                // 1. Update pesan utama (syncEditToTelegram inline)
+                // 1. Update pesan utama
                 if (syncText) {
                     requests.push({
                         url: `${telegramBaseUrl}/editMessageText`,
@@ -829,7 +894,7 @@ function prosesPendingUpdate(updateId, data) {
                     })
                 });
 
-                // Kirim semua request Telegram secara PARALEL
+                // Kirim SEMUA request network (WhatsApp + Telegram) secara PARALEL dalam 1 batch
                 UrlFetchApp.fetchAll(requests);
 
                 statusLog = "SUCCESS";
