@@ -344,7 +344,7 @@ function formatNomorWA(phone) {
 function doPost(e) {
     try {
         if (!e?.postData?.contents) {
-            return ContentService.createTextOutput("OK");
+            return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
         }
 
         const rawData = e.postData.contents;
@@ -359,11 +359,11 @@ function doPost(e) {
         }
 
 
-        return ContentService.createTextOutput("OK");
+        return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
 
     } catch (err) {
         console.error("Gateway Router Error:", err);
-        return ContentService.createTextOutput("OK");
+        return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
     }
 }
 
@@ -372,10 +372,14 @@ function handleTelegramWebhook(data, rawData) {
     const cache = CacheService.getScriptCache();
     const cacheKey = "tg_" + updateId;
 
-    if (cache.get(cacheKey)) {
-        return ContentService.createTextOutput("OK");
+    try {
+        if (cache.get(cacheKey)) {
+            return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+        }
+        cache.put(cacheKey, "1", 21600); // 6 jam
+    } catch (e) {
+        console.error("Cache Error at tg_ guard:", e);
     }
-    cache.put(cacheKey, "1", 21600); // 6 jam
 
     if (data.callback_query) {
         const cq = data.callback_query;
@@ -383,7 +387,14 @@ function handleTelegramWebhook(data, rawData) {
         const chatId = cq.message ? cq.message.chat.id : "";
         const lockKey = `lock_cb_${chatId}_${msgId}`;
 
-        if (cache.get(lockKey)) {
+        let isLocked = false;
+        try {
+            isLocked = cache.get(lockKey);
+        } catch(e) {
+            console.error("Cache Error at debounce get:", e);
+        }
+
+        if (isLocked) {
             console.warn(`[Debounce Guard] Menolak klik beruntun pada pesan ${msgId}.`);
             try {
                 UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/answerCallbackQuery`, {
@@ -397,11 +408,15 @@ function handleTelegramWebhook(data, rawData) {
                     })
                 });
             } catch (e) { /* abaikan */ }
-            return ContentService.createTextOutput("OK");
+            return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
         }
 
         // Pasang lock selama 6 detik untuk menahan request ganda
-        cache.put(lockKey, "1", 6);
+        try {
+            cache.put(lockKey, "1", 6);
+        } catch(e) {
+            console.error("Cache Error at debounce put:", e);
+        }
 
         try {
             UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/answerCallbackQuery`, {
@@ -415,7 +430,7 @@ function handleTelegramWebhook(data, rawData) {
 
     prosesPendingUpdate(updateId, data);
 
-    return ContentService.createTextOutput("OK");
+    return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
 }
 
 function handleWhatsAppWebhook(data, rawData) {
