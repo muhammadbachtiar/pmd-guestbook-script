@@ -344,7 +344,7 @@ function formatNomorWA(phone) {
 function doPost(e) {
     try {
         if (!e?.postData?.contents) {
-            return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+            return HtmlService.createHtmlOutput("OK");
         }
 
         const rawData = e.postData.contents;
@@ -359,11 +359,11 @@ function doPost(e) {
         }
 
 
-        return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+        return HtmlService.createHtmlOutput("OK");
 
     } catch (err) {
         console.error("Gateway Router Error:", err);
-        return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+        return HtmlService.createHtmlOutput("OK");
     }
 }
 
@@ -374,7 +374,7 @@ function handleTelegramWebhook(data, rawData) {
 
     try {
         if (cache.get(cacheKey)) {
-            return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+            return HtmlService.createHtmlOutput("OK");
         }
         cache.put(cacheKey, "1", 21600); // 6 jam
     } catch (e) {
@@ -408,7 +408,7 @@ function handleTelegramWebhook(data, rawData) {
                     })
                 });
             } catch (e) { /* abaikan */ }
-            return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+            return HtmlService.createHtmlOutput("OK");
         }
 
         // Pasang lock selama 6 detik untuk menahan request ganda
@@ -430,7 +430,7 @@ function handleTelegramWebhook(data, rawData) {
 
     prosesPendingUpdate(updateId, data);
 
-    return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+    return HtmlService.createHtmlOutput("OK");
 }
 
 function handleWhatsAppWebhook(data, rawData) {
@@ -476,12 +476,12 @@ function handleWhatsAppWebhook(data, rawData) {
     }
 
     if (isDuplicate) {
-        return ContentService.createTextOutput("OK");
+        return HtmlService.createHtmlOutput("OK");
     }
 
     prosesPendingWhatsAppUpdate(waUniqueId, data);
 
-    return ContentService.createTextOutput("OK");
+    return HtmlService.createHtmlOutput("OK");
 }
 
 function prosesPencarianTiket(userPhone, ticketId) {
@@ -667,12 +667,17 @@ function prosesPendingUpdate(updateId, data) {
                 const chatId = cq.message ? cq.message.chat.id : "";
                 cache.remove(`lock_cb_${chatId}_${msgId}`);
 
+                const rawText = cq.message ? cq.message.text || "" : "";
+                const cleanText = rawText.split(/\n\n(?:[✅⏳]\s*)?\*?STATUS:/i)[0].trim();
+
                 getSheet().getRange(rowLog, 11, 1, 2).setValues([["Menunggu Tindakan", ""]]);
-                UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageReplyMarkup`, {
+                UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageText`, {
                     method: 'post', contentType: 'application/json', muteHttpExceptions: true,
                     payload: JSON.stringify({
                         chat_id: cq.message.chat.id,
                         message_id: cq.message.message_id,
+                        text: cleanText,
+                        parse_mode: 'Markdown',
                         reply_markup: default_keyboard(rowLog, isDev)
                     })
                 });
@@ -685,17 +690,18 @@ function prosesPendingUpdate(updateId, data) {
             if (aksiLog === "PROSES") {
                 const bidangCode = parts[1];
                 const namaBidang = mapBidang[bidangCode] || bidangCode;
-                const msgText = cq.message ? cq.message.text || "" : "";
+                const rawText = cq.message ? cq.message.text || "" : "";
 
-                // GUARD: Jika pesan sudah berstatus 'Diproses', 'Selesai', atau 'Ditolak', skip!
-                if (msgText.includes("STATUS: Diproses") || msgText.includes("STATUS: Selesai") || msgText.includes("STATUS: Ditolak")) {
-                    console.warn(`[PROSES Guard] Pesan ${cq.message.message_id} sudah diproses sebelumnya. Skip.`);
+                // GUARD: Jika pesan sudah berstatus 'Selesai' atau 'Ditolak', skip!
+                if (rawText.includes("STATUS: Selesai") || rawText.includes("STATUS: Ditolak")) {
+                    console.warn(`[PROSES Guard] Pesan ${cq.message.message_id} sudah final. Skip.`);
                     statusLog = "SKIPPED_ALREADY_PROCESSED";
-                    detailLog = "Bidang sudah dipilih sebelumnya";
+                    detailLog = "Laporan sudah berstatus Selesai atau Ditolak";
                     return;
                 }
 
-                const pesanUpdate = `${msgText}\n\n✅ *STATUS: Diproses*\nOleh: ${namaBidang}\nPetugas: ${cq.from.first_name}`;
+                const baseText = rawText.split(/\n\n(?:[✅⏳]\s*)?\*?STATUS:/i)[0].trim();
+                const pesanUpdate = `${baseText}\n\n✅ *STATUS: Diproses*\nOleh: ${namaBidang}\nPetugas: ${cq.from.first_name}`;
                 const devPrefix = isDev ? "DEV_" : "";
 
                 const keyboard = {
@@ -729,9 +735,11 @@ function prosesPendingUpdate(updateId, data) {
                 const jenis = parts[1]; // "SELESAI" atau "TOLAK"
                 const rowStr = parts[2];
 
-                // Optimasi Cerdas: Ambil idTicket langsung dari cq.message.text (TANPA perlu I/O ke Spreadsheet!)
                 let idTicket = "Unknown";
-                const matchTicket = (cq.message.text || "").match(/ID Tiket:\s*([^\s\n]+)/i);
+                const rawText = cq.message ? cq.message.text || "" : "";
+                const baseText = rawText.split(/\n\n(?:[✅⏳]\s*)?\*?STATUS:/i)[0].trim();
+
+                const matchTicket = baseText.match(/ID Tiket:\s*([^\s\n]+)/i);
                 if (matchTicket) {
                     idTicket = matchTicket[1].trim();
                 }
@@ -741,7 +749,7 @@ function prosesPendingUpdate(updateId, data) {
                 const originalMessageId = cq.message.message_id;
 
                 const labelStatus = jenis === "TOLAK" ? "Menunggu Alasan Penolakan" : "Menunggu Catatan Penyelesaian";
-                const pesanUpdate = `${cq.message.text}\n\n⏳ *STATUS: ${labelStatus}*\nOleh: ${username}`;
+                const pesanUpdate = `${baseText}\n\n⏳ *STATUS: ${labelStatus}*\nOleh: ${username}`;
                 const devPrefix = isDev ? "DEV_" : "";
 
                 const keyboard = {
