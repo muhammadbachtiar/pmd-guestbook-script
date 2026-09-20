@@ -11,6 +11,37 @@ const WA_WEBHOOK_VERIFY_TOKEN = "xxxx";
 const SKM_URL = "xx";
 const WEBAPP_EXEC_URL = "https://script.google.com/macros/s/AKfycbyWzBMUlKNwPyil99TQh1B9UlbwGa3OHMdvKqdoHcsYYpc5Knxz5n3viDGwVj-dvlXP/exec";
 
+function escapeMarkdown(text) {
+    if (text === null || text === undefined) return "";
+    return text.toString().replace(/([*_`\[])/g, '\\$1');
+}
+
+function sanitizeInputText(text, maxLength = 1000) {
+    if (text === null || text === undefined) return "";
+    let str = text.toString().trim();
+    if (str.length > maxLength) {
+        str = str.substring(0, maxLength) + "... [Dipotong]";
+    }
+    return str;
+}
+
+function isValidIndonesianPhone(phone) {
+    if (!phone) return false;
+    const clean = phone.toString().replace(/\D/g, '');
+    return /^628\d{7,12}$/.test(clean);
+}
+
+function isValidTicketFormat(ticketId) {
+    if (!ticketId) return false;
+    return /^PMD-\d{8}-\d+-[A-Z0-9]{3,6}$/i.test(ticketId.trim());
+}
+
+function validateRowBounds(sheet, row) {
+    if (!sheet || !row || isNaN(row)) return false;
+    const r = parseInt(row);
+    return r >= 2 && r <= sheet.getLastRow();
+}
+
 function default_keyboard(row, isDev = false) {
     const prefix = isDev ? "DEV_" : "";
     return {
@@ -47,39 +78,6 @@ function generateTicketId(counter) {
     return idTicket;
 }
 
-// function onFormSubmit(e) {
-//   try {
-//     const sheet = e.range.getSheet();
-//     const row = e.range.getRow();
-//     const idTicket = generateTicketId(row);
-
-//     const kolomID = 10; 
-//     const kolomStatus = 11; 
-//     sheet.getRange(row, kolomID).setValue(idTicket);
-//     sheet.getRange(row, kolomStatus).setValue("Menunggu Tindakan");
-
-//     const nama            = e.namedValues['Nama Lengkap'] ? e.namedValues['Nama Lengkap'][0] : 'KOSONG';
-//     const nik             = e.namedValues['NIK (Nomor Induk Kependudukan)'] ? e.namedValues['NIK (Nomor Induk Kependudukan)'][0] : 'KOSONG';
-//     const nama_instansi   = e.namedValues['Nama Instansi'] ? e.namedValues['Nama Instansi'][0] : 'KOSONG';
-//     const jenis_keperluan = e.namedValues['Keperluan Kunjungan'] ? e.namedValues['Keperluan Kunjungan'][0] : 'KOSONG';
-//     const uraian          = e.namedValues['Uraian Singkat atau Detail Pengaduan'] ? e.namedValues['Uraian Singkat atau Detail Pengaduan'][0] : 'KOSONG';
-
-//     const noWaRaw         = e.namedValues['Nomor WhatsApp atau Telepon'] ? e.namedValues['Nomor WhatsApp atau Telepon'][0] : '';
-
-//     sendTelegramAdmin(idTicket, nama, nik, nama_instansi, jenis_keperluan, uraian, row);
-
-//     if (noWaRaw && noWaRaw !== 'KOSONG') {
-//       const cleanNoWa = formatNomorWA(noWaRaw);
-//       sendWhatsAppUser(cleanNoWa, nama, idTicket);
-//     } else {
-//       Logger.log(`Baris ${row}: Nomor WA tidak ditemukan/kosong. Lewati notifikasi WA.`);
-//     }
-
-//   } catch (error) {
-//     Logger.log("Error fatal pada fungsi onFormSubmit: " + error.toString());
-//   }
-// }
-
 function onFormSubmit(e) {
     try {
         const sheetProd = e.range.getSheet();
@@ -88,7 +86,6 @@ function onFormSubmit(e) {
         const nama = e.namedValues['Nama Lengkap'] ? e.namedValues['Nama Lengkap'][0] : 'KOSONG';
 
         if (nama.includes("[TEST]") || nama.includes("DEV-")) {
-
 
             const ssDev = SpreadsheetApp.openById(DEV_SPREADSHEET_ID);
             const sheetDev = ssDev.getSheetByName(sheetProd.getName());
@@ -148,20 +145,30 @@ function onFormSubmit(e) {
             const uraian = e.namedValues['Uraian Singkat atau Detail Pengaduan'] ? e.namedValues['Uraian Singkat atau Detail Pengaduan'][0] : 'KOSONG';
             const noWaRaw = e.namedValues['Nomor WhatsApp atau Telepon'] ? e.namedValues['Nomor WhatsApp atau Telepon'][0] : '';
 
-            const telegramMsgIdDev = sendTelegramAdmin(idTicketDev, nama, nik, nama_instansi, jenis_keperluan, uraian, rowDev, true);
+            // Sanitasi teks input
+            const safeNama = sanitizeInputText(nama, 100);
+            const safeNik = sanitizeInputText(nik, 20);
+            const safeInstansi = sanitizeInputText(nama_instansi, 150);
+            const safeKeperluan = sanitizeInputText(jenis_keperluan, 200);
+            const safeUraian = sanitizeInputText(uraian, 1000);
+
+            const telegramMsgIdDev = sendTelegramAdmin(idTicketDev, safeNama, safeNik, safeInstansi, safeKeperluan, safeUraian, rowDev, true);
             if (telegramMsgIdDev) {
                 sheetDev.getRange(rowDev, 15).setValue(telegramMsgIdDev); // Kolom O (15) = Telegram_Message_ID
             }
 
             if (noWaRaw && noWaRaw !== 'KOSONG') {
                 const cleanNoWa = formatNomorWA(noWaRaw);
-                sendWhatsAppUser(cleanNoWa, nama, idTicketDev); // Kirim ke nomor testing Anda
+                if (isValidIndonesianPhone(cleanNoWa)) {
+                    sendWhatsAppUser(cleanNoWa, safeNama, idTicketDev); // Kirim ke nomor testing Anda
+                } else {
+                    Logger.log(`[DEV] Baris ${rowDev}: Nomor WA (${cleanNoWa}) tidak memenuhi format 628. Notifikasi WA dilewati.`);
+                }
             }
 
             Logger.log(`[DEV] Alur pengujian berhasil dieksekusi untuk baris ${rowDev}`);
 
         } else {
-
 
             const idTicket = generateTicketId(rowProd);
             const kolomID = 10;
@@ -175,14 +182,25 @@ function onFormSubmit(e) {
             const uraian = e.namedValues['Uraian Singkat atau Detail Pengaduan'] ? e.namedValues['Uraian Singkat atau Detail Pengaduan'][0] : 'KOSONG';
             const noWaRaw = e.namedValues['Nomor WhatsApp atau Telepon'] ? e.namedValues['Nomor WhatsApp atau Telepon'][0] : '';
 
-            const telegramMsgId = sendTelegramAdmin(idTicket, nama, nik, nama_instansi, jenis_keperluan, uraian, rowProd, false);
+            // Sanitasi teks input
+            const safeNama = sanitizeInputText(nama, 100);
+            const safeNik = sanitizeInputText(nik, 20);
+            const safeInstansi = sanitizeInputText(nama_instansi, 150);
+            const safeKeperluan = sanitizeInputText(jenis_keperluan, 200);
+            const safeUraian = sanitizeInputText(uraian, 1000);
+
+            const telegramMsgId = sendTelegramAdmin(idTicket, safeNama, safeNik, safeInstansi, safeKeperluan, safeUraian, rowProd, false);
             if (telegramMsgId) {
                 sheetProd.getRange(rowProd, 15).setValue(telegramMsgId); // Kolom O (15) = Telegram_Message_ID
             }
 
             if (noWaRaw && noWaRaw !== 'KOSONG') {
                 const cleanNoWa = formatNomorWA(noWaRaw);
-                sendWhatsAppUser(cleanNoWa, nama, idTicket);
+                if (isValidIndonesianPhone(cleanNoWa)) {
+                    sendWhatsAppUser(cleanNoWa, safeNama, idTicket);
+                } else {
+                    Logger.log(`Baris ${rowProd}: Nomor WA (${cleanNoWa}) tidak memenuhi format 628. Notifikasi WA dilewati.`);
+                }
             }
         }
 
@@ -192,17 +210,22 @@ function onFormSubmit(e) {
 }
 
 function sendTelegramAdmin(idTicket, nama, nik, nama_instansi, jenis_keperluan, uraian, row, isDev = false) {
+    const safeTicket = escapeMarkdown(idTicket);
+    const safeNama = escapeMarkdown(nama);
+    const safeNik = escapeMarkdown(nik);
+    const safeInstansi = escapeMarkdown(nama_instansi);
+    const safeKeperluan = escapeMarkdown(jenis_keperluan);
+    const safeUraian = escapeMarkdown(uraian);
+
     const pesanText =
-        `🚨 *Laporan/Tamu Baru Masuk!* 🚨
-
-  📌 *ID Tiket:* ${idTicket}
-  👤 *Nama:* ${nama}
-  🆔 *NIK:* ${nik}
-  🏢 *Instansi:* ${nama_instansi}
-  🎯 *Keperluan:* ${jenis_keperluan}
-  📝 *Uraian:* ${uraian}
-
-  Silakan cek detail lebih lanjut di *Dashboard* atau *Google Sheets*.`;
+        `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n` +
+        `  📌 *ID Tiket:* ${safeTicket}\n` +
+        `  👤 *Nama:* ${safeNama}\n` +
+        `  🆔 *NIK:* ${safeNik}\n` +
+        `  🏢 *Instansi:* ${safeInstansi}\n` +
+        `  🎯 *Keperluan:* ${safeKeperluan}\n` +
+        `  📝 *Uraian:* ${safeUraian}\n\n` +
+        `  Silakan cek detail lebih lanjut di *Dashboard* atau *Google Sheets*.`;
 
     const url = `https://api.telegram.org/bot${TELEBOT_TOKEN}/sendMessage`;
     const options = {
@@ -254,16 +277,6 @@ function sendWhatsAppUser(noWa, name, id_ticket) {
         }
     };
 
-    //  const payload = {
-    //   "messaging_product": "whatsapp",
-    //   "to": noWa,
-    //   "type": "template",
-    //   "template": {
-    //     "name": WA_TEMPLATE_NAME,
-    //     "language": { "code": "en_US" }
-    //   }
-    // };
-
     const options = {
         "method": "post",
         "contentType": "application/json",
@@ -287,59 +300,6 @@ function formatNomorWA(phone) {
     }
     return cleaned;
 }
-
-
-// function onFormSubmit(e) {
-//   const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-
-//   const row = e.range.getRow();
-
-//   const date = new Date();
-//   const year = date.getFullYear();
-//   const month = ("0" + (date.getMonth() + 1)).slice(-2);
-//   const day = ("0" + date.getDate()).slice(-2);
-//   const idTicket = `PMD-${year}${month}${day}-${row}`;
-
-//   const kolomID = 10; 
-//   const kolomStatus = 11; 
-
-//   sheet.getRange(row, kolomID).setValue(idTicket);
-//   sheet.getRange(row, kolomStatus).setValue("Menunggu Tindakan");
-
-//   const nama = e.namedValues['Nama Lengkap'] ? e.namedValues['Nama Lengkap'][0] : 'KOSONG';
-//   const nik = e.namedValues['NIK (Nomor Induk Kependudukan)'] ? e.namedValues['NIK (Nomor Induk Kependudukan)'][0] : 'KOSONG';
-//   const nama_instansi = e.namedValues['Nama Instansi'] ? e.namedValues['Nama Instansi'][0] : 'KOSONG';
-//   const jenis_keperluan = e.namedValues['Keperluan Kunjungan'] ? e.namedValues['Keperluan Kunjungan'][0] : 'KOSONG';
-//   const uraian = e.namedValues['Uraian Singkat atau Detail Pengaduan'] ? e.namedValues['Uraian Singkat atau Detail Pengaduan'][0] : 'KOSONG';
-
-//   const pesanText = 
-//   `🚨 *Laporan/Tamu Baru Masuk!* 🚨
-
-//   📌 *ID Tiket:* ${idTicket}
-//   👤 *Nama:* ${nama}
-//   🆔 *NIK:* ${nik}
-//   🏢 *Instansi:* ${nama_instansi}
-//   🎯 *Keperluan:* ${jenis_keperluan}
-//   📝 *Uraian:* ${uraian}
-
-//   Silakan cek detail lebih lanjut di *Dashboard* atau *Google Sheets*.`;
-
-//   const url = `https://api.telegram.org/bot${TELEBOT_TOKEN}/sendMessage`;
-//   const options = {
-//     method: 'post',
-//     contentType: 'application/json',
-//     payload: JSON.stringify({
-//       chat_id: TELEGROUP_ID,
-//       text: pesanText,
-//       parse_mode: 'Markdown',
-//       reply_markup: default_keyboard(row) 
-//     })
-//   };
-
-//   const response = UrlFetchApp.fetch(url, options);
-//   Logger.log(response.getContentText());
-// }
-
 
 function doPost(e) {
     try {
@@ -390,7 +350,7 @@ function handleTelegramWebhook(data, rawData) {
         let isLocked = false;
         try {
             isLocked = cache.get(lockKey);
-        } catch(e) {
+        } catch (e) {
             console.error("Cache Error at debounce get:", e);
         }
 
@@ -414,7 +374,7 @@ function handleTelegramWebhook(data, rawData) {
         // Pasang lock selama 6 detik untuk menahan request ganda
         try {
             cache.put(lockKey, "1", 6);
-        } catch(e) {
+        } catch (e) {
             console.error("Cache Error at debounce put:", e);
         }
 
@@ -485,20 +445,37 @@ function handleWhatsAppWebhook(data, rawData) {
 }
 
 function prosesPencarianTiket(userPhone, ticketId) {
+    const cleanTicketId = (ticketId || "").trim();
+
+    if (!isValidTicketFormat(cleanTicketId)) {
+        kirimWaTeksBiasa(userPhone, `⚠️ *Format Tiket Tidak Valid*\n\nFormat nomor tiket yang Anda masukkan tidak sesuai.\nContoh format tiket yang benar: *PMD-20260913-2-ABCD*\n\nSilakan periksa kembali karakter dan ejaan tiket Anda.`);
+        return;
+    }
+
+    const cache = CacheService.getScriptCache();
+    const rateKey = `rate_wa_search_${userPhone}`;
+    if (cache.get(rateKey)) {
+        kirimWaTeksBiasa(userPhone, `⏳ Mohon tunggu beberapa detik sebelum melakukan pencarian tiket kembali.`);
+        return;
+    }
+    try {
+        cache.put(rateKey, "1", 3);
+    } catch (e) { /* abaikan error cache */ }
+
     const sheet = SpreadsheetApp.openById(SPREADSHEET_ID);
     const data = sheet.getDataRange().getValues();
 
-    const colIndexTiket = 9
-    const colIndexStatus = 10
-    const colIndexNama = 1
-    const colIndexUlasan = 12
-    const colIndexBidangPJ = 11
-    const colIndexKeperluan = 7
+    const colIndexTiket = 9;
+    const colIndexStatus = 10;
+    const colIndexNama = 1;
+    const colIndexUlasan = 12;
+    const colIndexBidangPJ = 11;
+    const colIndexKeperluan = 7;
 
     let rowFound = -1;
 
     for (let i = data.length - 1; i >= 1; i--) {
-        if (data[i][colIndexTiket].toString().toUpperCase() === ticketId.toUpperCase()) {
+        if (data[i][colIndexTiket].toString().toUpperCase() === cleanTicketId.toUpperCase()) {
             rowFound = i;
             break;
         }
@@ -512,7 +489,7 @@ function prosesPencarianTiket(userPhone, ticketId) {
         const keperluan = data[rowFound][colIndexKeperluan] || "Tidak ada keterangan";
 
         let pesanBalasan = `📄 *DETAIL STATUS LAPORAN* 📄\n\n` +
-            `🎫 *ID Tiket:* ${ticketId}\n` +
+            `🎫 *ID Tiket:* ${cleanTicketId}\n` +
             `👤 *Nama:* ${namaUser}\n` +
             `🏢 *Bidang Penanggung Jawab:* ${bidangPJ}\n` +
             `📌 *Keperluan Kunjungan:* ${keperluan}\n` +
@@ -527,7 +504,7 @@ function prosesPencarianTiket(userPhone, ticketId) {
         }
         kirimWaTeksBiasa(userPhone, pesanBalasan);
     } else {
-        kirimWaTeksBiasa(userPhone, `❌ *Tiket Tidak Ditemukan*\n\nMaaf, nomor tiket *${ticketId}* tidak terdaftar di sistem kami. Mohon periksa kembali karakter dan ejaan tiket Anda.`);
+        kirimWaTeksBiasa(userPhone, `❌ *Tiket Tidak Ditemukan*\n\nMaaf, nomor tiket *${cleanTicketId}* tidak terdaftar di sistem kami. Mohon periksa kembali karakter dan ejaan tiket Anda.`);
     }
 }
 
@@ -560,13 +537,13 @@ function prosesPendingWhatsAppUpdate(waUniqueId, data) {
     if (!data) return;
 
     try {
-        const changeValue = data.entry[0].changes[0].value;
+        const changeValue = data.entry?.[0]?.changes?.[0]?.value;
 
-        if (changeValue.messages && changeValue.messages[0]) {
+        if (Array.isArray(changeValue?.messages) && changeValue.messages.length > 0) {
             const messageObject = changeValue.messages[0];
             const userPhone = messageObject.from;
 
-            if (messageObject.type === "text") {
+            if (messageObject.type === "text" && messageObject.text?.body) {
                 const userText = messageObject.text.body.trim();
 
                 if (userText.toUpperCase().startsWith("CEK")) {
@@ -657,7 +634,7 @@ function prosesPendingUpdate(updateId, data) {
 
             console.log(`[CALLBACK] Processing callbackData: ${cq.data} (isDev: ${isDev})`);
 
-            if (isNaN(rowLog) || rowLog < 2) throw new Error("Row tidak valid");
+            if (isNaN(rowLog) || !validateRowBounds(getSheet(), rowLog)) throw new Error("Row tidak valid atau di luar jangkauan spreadsheet");
 
             // ==================== BATAL ====================
             if (aksiLog === "BATAL") {
@@ -809,11 +786,15 @@ function prosesPendingUpdate(updateId, data) {
                 aksiLog = jenis;
                 const originalMessageId = parseInt(matchMain[1]);
 
-                const teksBalasan = data.message.text;
-                const pengisi = data.message.from.first_name;
-                const chatId = data.message.chat.id;
-
                 const sheet = getSheet();
+                if (isNaN(rowLog) || !validateRowBounds(sheet, rowLog)) {
+                    throw new Error("Row reply tidak valid atau di luar jangkauan spreadsheet");
+                }
+
+                const teksBalasan = data.message.text || "";
+                const safeTeksBalasan = sanitizeInputText(teksBalasan, 1000);
+                const pengisi = data.message.from.first_name || "Petugas";
+                const chatId = data.message.chat.id;
 
                 // Batch read: ambil kolom J(10), K(11), L(12), O(15) sekaligus dalam 1 panggilan
                 const rowData = sheet.getRange(rowLog, 1, 1, 15).getValues()[0];
@@ -836,7 +817,7 @@ function prosesPendingUpdate(updateId, data) {
                 const statusBaru = jenis === "TOLAK" ? "Ditolak" : "Selesai";
 
                 // Batch write status (11), bidang (12), dan catatan (13) sekaligus dalam 1 panggilan API
-                sheet.getRange(rowLog, 11, 1, 3).setValues([[statusBaru, bidangPJ, teksBalasan]]);
+                sheet.getRange(rowLog, 11, 1, 3).setValues([[statusBaru, bidangPJ, safeTeksBalasan]]);
 
                 const requests = [];
 
@@ -865,11 +846,16 @@ function prosesPendingUpdate(updateId, data) {
                 // === Batch Telegram API calls ===
                 const targetMsgId = telegramMsgIdInSheet || originalMessageId;
                 const statusUpper = statusBaru.toUpperCase();
+                const safeIdTicketEsc = escapeMarkdown(idTicket);
+                const safeTeksBalasanEsc = escapeMarkdown(safeTeksBalasan);
+                const safeBidangEsc = escapeMarkdown(bidangPJ);
+                const safePengisiEsc = escapeMarkdown(pengisi);
+
                 let syncText = "";
                 if (statusUpper === "DITOLAK") {
-                    syncText = `❌ *LAPORAN DITOLAK*\n🎫 Tiket: ${idTicket}\n📝 Alasan: ${teksBalasan}\n\n_Pesan ini telah difinalisasi._`;
+                    syncText = `❌ *LAPORAN DITOLAK*\n🎫 Tiket: ${safeIdTicketEsc}\n📝 Alasan: ${safeTeksBalasanEsc}\n\n_Pesan ini telah difinalisasi._`;
                 } else if (statusUpper === "SELESAI") {
-                    syncText = `✅ *LAPORAN SELESAI*\n🎫 Tiket: ${idTicket}\n🏢 Bidang: ${bidangPJ}\n📝 Catatan: ${teksBalasan}\n\n_Pesan ini telah difinalisasi._`;
+                    syncText = `✅ *LAPORAN SELESAI*\n🎫 Tiket: ${safeIdTicketEsc}\n🏢 Bidang: ${safeBidangEsc}\n📝 Catatan: ${safeTeksBalasanEsc}\n\n_Pesan ini telah difinalisasi._`;
                 }
 
                 const telegramBaseUrl = `https://api.telegram.org/bot${TELEBOT_TOKEN}`;
@@ -912,7 +898,7 @@ function prosesPendingUpdate(updateId, data) {
                     muteHttpExceptions: true,
                     payload: JSON.stringify({
                         chat_id: chatId,
-                        text: `✅ Laporan ${idTicket} (${isDev ? 'DEV' : 'PROD'}) berhasil ${jenis === "TOLAK" ? "DITOLAK" : "DISELESAIKAN"} oleh ${pengisi}.`,
+                        text: `✅ Laporan ${safeIdTicketEsc} (${isDev ? 'DEV' : 'PROD'}) berhasil ${jenis === "TOLAK" ? "DITOLAK" : "DISELESAIKAN"} oleh ${safePengisiEsc}.`,
                         parse_mode: "Markdown"
                     })
                 });
@@ -1084,6 +1070,7 @@ function onSpreadsheetEdit(e) {
 
         const row = e.range.getRow();
         if (row < 2) return; // Abaikan baris header
+        if (!validateRowBounds(sheet, row)) return;
 
         const col = e.range.getColumn();
         // Hanya proses jika yang diedit adalah Kolom K, L, atau M
@@ -1152,13 +1139,18 @@ function syncEditToTelegram(messageId, status, bidang, catatan, idTicket, row, i
     let keyboard = { inline_keyboard: [] };
     const devPrefix = isDev ? "DEV_" : "";
 
+    const safeTicket = escapeMarkdown(idTicket);
+    const safeBidang = escapeMarkdown(sanitizeInputText(bidang, 100));
+    const safeCatatan = escapeMarkdown(sanitizeInputText(catatan, 1000));
+    const safeStatus = escapeMarkdown(status);
+
     if (statusUpper === "MENUNGGU TINDAKAN" || statusUpper === "") {
-        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${idTicket}\n\nSilakan tentukan bidang penanggung jawab:`;
+        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${safeTicket}\n\nSilakan tentukan bidang penanggung jawab:`;
         keyboard = default_keyboard(row, isDev);
 
     } else if (statusUpper === "DIPROSES") {
-        const bidangStr = bidang || "(Bidang belum ditentukan)";
-        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${idTicket}\n\n✅ *STATUS: Diproses*\nOleh: ${bidangStr}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
+        const bidangStr = safeBidang || "(Bidang belum ditentukan)";
+        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${safeTicket}\n\n✅ *STATUS: Diproses*\nOleh: ${bidangStr}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
         keyboard = {
             inline_keyboard: [
                 [{ text: "✅ Tandai Selesai", callback_data: `${devPrefix}TANYA_SELESAI_${row}` }],
@@ -1167,19 +1159,19 @@ function syncEditToTelegram(messageId, status, bidang, catatan, idTicket, row, i
         };
 
     } else if (statusUpper === "SELESAI") {
-        const bidangStr = bidang || "(Bidang)";
-        const catatanStr = catatan || "(Catatan belum diisi)";
-        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${idTicket}\n\n🎉 *STATUS: Selesai*\nOleh: ${bidangStr}\nCatatan: ${catatanStr}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
+        const bidangStr = safeBidang || "(Bidang)";
+        const catatanStr = safeCatatan || "(Catatan belum diisi)";
+        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${safeTicket}\n\n🎉 *STATUS: Selesai*\nOleh: ${bidangStr}\nCatatan: ${catatanStr}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
         keyboard = { inline_keyboard: [] }; // Hapus semua tombol
 
     } else if (statusUpper === "DITOLAK") {
-        const alasanStr = catatan || "(Alasan belum diisi)";
-        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${idTicket}\n\n❌ *STATUS: Ditolak*\nAlasan: ${alasanStr}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
+        const alasanStr = safeCatatan || "(Alasan belum diisi)";
+        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${safeTicket}\n\n❌ *STATUS: Ditolak*\nAlasan: ${alasanStr}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
         keyboard = { inline_keyboard: [] }; // Hapus semua tombol
 
     } else {
         // Status tidak dikenal — tetap update teks apa adanya
-        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${idTicket}\n\n📊 *Status:* ${status}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
+        text = `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n📌 *ID Tiket:* ${safeTicket}\n\n📊 *Status:* ${safeStatus}\n_(Diperbarui dari Spreadsheet${isDev ? ' DEV' : ''})_`;
         keyboard = { inline_keyboard: [] };
     }
 
