@@ -42,6 +42,32 @@ function validateRowBounds(sheet, row) {
     return r >= 2 && r <= sheet.getLastRow();
 }
 
+function findRowByTicketId(sheet, ticketId, suggestedRow) {
+    if (!sheet || !ticketId) return -1;
+    const cleanTicket = ticketId.toString().trim().toUpperCase();
+
+    if (suggestedRow && !isNaN(suggestedRow)) {
+        const sRow = parseInt(suggestedRow);
+        if (sRow >= 2 && sRow <= sheet.getLastRow()) {
+            const valAtSuggested = sheet.getRange(sRow, 10).getValue().toString().trim().toUpperCase();
+            if (valAtSuggested === cleanTicket) {
+                return sRow;
+            }
+        }
+    }
+
+    const allData = sheet.getDataRange().getValues();
+    for (let i = allData.length - 1; i >= 1; i--) {
+        const valInColJ = (allData[i][9] || "").toString().trim().toUpperCase();
+        if (valInColJ === cleanTicket) {
+            console.log(`[Row Shift Detected] Ticket ${cleanTicket} bergeser dari baris ${suggestedRow} ke baris ${i + 1}`);
+            return i + 1;
+        }
+    }
+
+    return -1;
+}
+
 function default_keyboard(row, isDev = false) {
     const prefix = isDev ? "DEV_" : "";
     return {
@@ -557,6 +583,24 @@ function prosesPendingWhatsAppUpdate(waUniqueId, data) {
                     const menuSapaan = `👋 Halo! Selamat datang di Layanan Si Buku Tamu Online DPMD Kabupaten Muara Enim.\n\nUntuk mengecek status perkembangan laporan Anda, silakan ketik:\n*CEK [Nomor Tiket]*`;
                     kirimWaTeksBiasa(userPhone, menuSapaan);
                 }
+            } else {
+                // Rate limit fallback per user (max 1 fallback per 3 detik untuk mencegah spam pengiriman batch media)
+                const cache = CacheService.getScriptCache();
+                const fallbackRateKey = `rate_wa_fallback_${userPhone}`;
+                if (!cache.get(fallbackRateKey)) {
+                    try {
+                        cache.put(fallbackRateKey, "1", 3);
+                    } catch (e) { /* abaikan error cache */ }
+
+                    const pesanFallbackMedia =
+                        `👋 *Halo Pengguna Layanan*\n\n` +
+                        `Mohon maaf, saat ini sistem otomatis kami belum dapat memproses pesan non-teks (seperti gambar, dokumen, pesan suara, atau lokasi).\n\n` +
+                        `💡 *Untuk mengecek status perkembangan laporan Anda*, silakan ketik pesan teks dengan format:\n` +
+                        `*CEK [Nomor Tiket]*\n\n` +
+                        `_Contoh: CEK PMD-20260920-2-ABCD_\n\n` +
+                        `Terima kasih! 🙏`;
+                    kirimWaTeksBiasa(userPhone, pesanFallbackMedia);
+                }
             }
         }
 
@@ -630,11 +674,53 @@ function prosesPendingUpdate(updateId, data) {
             }
             const parts = callbackData.split('_');
             const aksiLog = parts[0];
-            const rowLog = parseInt(parts[parts.length - 1]);
+            const suggestedRow = parseInt(parts[parts.length - 1]);
 
             console.log(`[CALLBACK] Processing callbackData: ${cq.data} (isDev: ${isDev})`);
 
-            if (isNaN(rowLog) || !validateRowBounds(getSheet(), rowLog)) throw new Error("Row tidak valid atau di luar jangkauan spreadsheet");
+            if (isNaN(suggestedRow)) {
+                statusLog = "SKIPPED_INVALID_ROW";
+                detailLog = "suggestedRow NaN";
+                return;
+            }
+
+            // Ekstrak idTicket dari pesan Telegram untuk Dynamic Row Lookup
+            const msgText = cq.message ? cq.message.text || "" : "";
+            const baseTextCb = msgText.split(/\n\n(?:[✅⏳]\s*)?\*?STATUS:/i)[0].trim();
+            let idTicketCb = "";
+            const matchTicketCb = baseTextCb.match(/ID Tiket:\s*([^\s\n]+)/i);
+            if (matchTicketCb) idTicketCb = matchTicketCb[1].trim();
+
+            const sheet = getSheet();
+            let rowLog = suggestedRow;
+
+            // Dynamic Row Lookup: Fast Path + Fallback Scan (anti row-shifting)
+            if (idTicketCb) {
+                const verifiedRow = findRowByTicketId(sheet, idTicketCb, suggestedRow);
+                if (verifiedRow === -1) {
+                    console.warn(`[Row Lookup Guard] Tiket ${idTicketCb} tidak ditemukan di Spreadsheet.`);
+                    try {
+                        UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/sendMessage`, {
+                            method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+                            payload: JSON.stringify({
+                                chat_id: cq.message.chat.id,
+                                text: `⚠️ *Gagal:* Data tiket *${escapeMarkdown(idTicketCb)}* tidak ditemukan di Spreadsheet (kemungkinan baris data telah dihapus).`,
+                                parse_mode: 'Markdown'
+                            })
+                        });
+                    } catch (e) { /* abaikan */ }
+                    statusLog = "SKIPPED_NOT_FOUND";
+                    detailLog = `Tiket ${idTicketCb} tidak ditemukan di sheet`;
+                    return;
+                }
+                rowLog = verifiedRow;
+            } else {
+                if (!validateRowBounds(sheet, suggestedRow)) {
+                    statusLog = "SKIPPED_INVALID_ROW";
+                    detailLog = "Row di luar jangkauan spreadsheet";
+                    return;
+                }
+            }
 
             // ==================== BATAL ====================
             if (aksiLog === "BATAL") {
@@ -644,10 +730,9 @@ function prosesPendingUpdate(updateId, data) {
                 const chatId = cq.message ? cq.message.chat.id : "";
                 cache.remove(`lock_cb_${chatId}_${msgId}`);
 
-                const rawText = cq.message ? cq.message.text || "" : "";
-                const cleanText = rawText.split(/\n\n(?:[✅⏳]\s*)?\*?STATUS:/i)[0].trim();
+                const cleanText = msgText.split(/\n\n(?:[✅⏳]\s*)?\*?STATUS:/i)[0].trim();
 
-                getSheet().getRange(rowLog, 11, 1, 2).setValues([["Menunggu Tindakan", ""]]);
+                sheet.getRange(rowLog, 11, 1, 2).setValues([["Menunggu Tindakan", ""]]);
                 UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageText`, {
                     method: 'post', contentType: 'application/json', muteHttpExceptions: true,
                     payload: JSON.stringify({
@@ -667,18 +752,16 @@ function prosesPendingUpdate(updateId, data) {
             if (aksiLog === "PROSES") {
                 const bidangCode = parts[1];
                 const namaBidang = mapBidang[bidangCode] || bidangCode;
-                const rawText = cq.message ? cq.message.text || "" : "";
 
                 // GUARD: Jika pesan sudah berstatus 'Selesai' atau 'Ditolak', skip!
-                if (rawText.includes("STATUS: Selesai") || rawText.includes("STATUS: Ditolak")) {
+                if (msgText.includes("STATUS: Selesai") || msgText.includes("STATUS: Ditolak")) {
                     console.warn(`[PROSES Guard] Pesan ${cq.message.message_id} sudah final. Skip.`);
                     statusLog = "SKIPPED_ALREADY_PROCESSED";
                     detailLog = "Laporan sudah berstatus Selesai atau Ditolak";
                     return;
                 }
 
-                const baseText = rawText.split(/\n\n(?:[✅⏳]\s*)?\*?STATUS:/i)[0].trim();
-                const pesanUpdate = `${baseText}\n\n✅ *STATUS: Diproses*\nOleh: ${namaBidang}\nPetugas: ${cq.from.first_name}`;
+                const pesanUpdate = `${baseTextCb}\n\n✅ *STATUS: Diproses*\nOleh: ${namaBidang}\nPetugas: ${cq.from.first_name}`;
                 const devPrefix = isDev ? "DEV_" : "";
 
                 const keyboard = {
@@ -700,8 +783,8 @@ function prosesPendingUpdate(updateId, data) {
                     })
                 });
 
-                // Tulis ke Spreadsheet setelah tampilan Telegram ter-update
-                getSheet().getRange(rowLog, 11, 1, 2).setValues([["Diproses", namaBidang]]);
+                // Tulis ke Spreadsheet setelah tampilan Telegram ter-update (rowLog sudah terverifikasi)
+                sheet.getRange(rowLog, 11, 1, 2).setValues([["Diproses", namaBidang]]);
 
                 statusLog = "SUCCESS";
                 detailLog = `Diproses oleh ${namaBidang}`;
@@ -710,23 +793,15 @@ function prosesPendingUpdate(updateId, data) {
             // ==================== TANYA (Tolak / Selesai) ====================
             else if (aksiLog === "TANYA") {
                 const jenis = parts[1]; // "SELESAI" atau "TOLAK"
-                const rowStr = parts[2];
+                const rowStr = rowLog.toString(); // rowLog sudah terverifikasi & di-refresh
 
-                let idTicket = "Unknown";
-                const rawText = cq.message ? cq.message.text || "" : "";
-                const baseText = rawText.split(/\n\n(?:[✅⏳]\s*)?\*?STATUS:/i)[0].trim();
-
-                const matchTicket = baseText.match(/ID Tiket:\s*([^\s\n]+)/i);
-                if (matchTicket) {
-                    idTicket = matchTicket[1].trim();
-                }
-
+                const idTicketTanya = idTicketCb || "Unknown";
                 const kataTugas = jenis === "TOLAK" ? "alasan penolakan" : "catatan penyelesaian";
                 const username = cq.from.username ? "@" + cq.from.username : cq.from.first_name;
                 const originalMessageId = cq.message.message_id;
 
                 const labelStatus = jenis === "TOLAK" ? "Menunggu Alasan Penolakan" : "Menunggu Catatan Penyelesaian";
-                const pesanUpdate = `${baseText}\n\n⏳ *STATUS: ${labelStatus}*\nOleh: ${username}`;
+                const pesanUpdate = `${baseTextCb}\n\n⏳ *STATUS: ${labelStatus}*\nOleh: ${username}`;
                 const devPrefix = isDev ? "DEV_" : "";
 
                 const keyboard = {
@@ -736,7 +811,7 @@ function prosesPendingUpdate(updateId, data) {
                 };
 
                 const devTag = isDev ? "_DEV" : "";
-                const replyMsg = `[#ROW_${rowStr}_${jenis}${devTag}] [#MAIN_${originalMessageId}] ${username}, silakan balas (reply) pesan ini dengan *${kataTugas}* untuk laporan ini.\nTiket: ${idTicket}`;
+                const replyMsg = `[#ROW_${rowStr}_${jenis}${devTag}] [#MAIN_${originalMessageId}] ${username}, silakan balas (reply) pesan ini dengan *${kataTugas}* untuk laporan ini.\nTiket: ${idTicketTanya}`;
 
                 const telegramBaseUrl = `https://api.telegram.org/bot${TELEBOT_TOKEN}`;
 
@@ -778,7 +853,7 @@ function prosesPendingUpdate(updateId, data) {
             const matchMain = repliedText.match(/#MAIN_(\d+)/);
 
             if (matchRow && matchMain) {
-                rowLog = parseInt(matchRow[1]);
+                const suggestedRowReply = parseInt(matchRow[1]);
                 const jenis = matchRow[2];
                 if (matchRow[3] === "_DEV") {
                     isDev = true;
@@ -787,8 +862,38 @@ function prosesPendingUpdate(updateId, data) {
                 const originalMessageId = parseInt(matchMain[1]);
 
                 const sheet = getSheet();
-                if (isNaN(rowLog) || !validateRowBounds(sheet, rowLog)) {
-                    throw new Error("Row reply tidak valid atau di luar jangkauan spreadsheet");
+
+                // Ekstrak idTicket dari pesan reply instruksi ("Tiket: PMD-...")
+                let idTicketReply = "";
+                const matchTicketReply = repliedText.match(/Tiket:\s*([^\s\n]+)/i);
+                if (matchTicketReply) idTicketReply = matchTicketReply[1].trim();
+
+                let rowLog = suggestedRowReply;
+                if (idTicketReply) {
+                    const verifiedRow = findRowByTicketId(sheet, idTicketReply, suggestedRowReply);
+                    if (verifiedRow === -1) {
+                        console.warn(`[REPLY Row Guard] Tiket ${idTicketReply} tidak ditemukan di Spreadsheet.`);
+                        try {
+                            UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/sendMessage`, {
+                                method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+                                payload: JSON.stringify({
+                                    chat_id: data.message.chat.id,
+                                    text: `⚠️ *Gagal:* Data tiket *${escapeMarkdown(idTicketReply)}* tidak ditemukan di Spreadsheet (kemungkinan baris data telah dihapus).`,
+                                    parse_mode: 'Markdown'
+                                })
+                            });
+                        } catch (e) { /* abaikan */ }
+                        statusLog = "SKIPPED_NOT_FOUND";
+                        detailLog = `Tiket ${idTicketReply} tidak ditemukan di sheet`;
+                        return;
+                    }
+                    rowLog = verifiedRow;
+                } else {
+                    if (isNaN(rowLog) || !validateRowBounds(sheet, rowLog)) {
+                        statusLog = "SKIPPED_INVALID_ROW";
+                        detailLog = "Row reply tidak valid atau di luar jangkauan spreadsheet";
+                        return;
+                    }
                 }
 
                 const teksBalasan = data.message.text || "";
