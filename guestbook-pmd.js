@@ -4,10 +4,8 @@ const TELEGROUP_ID = "xxx";
 const SPREADSHEET_ID = "xxxx";
 const DEV_SPREADSHEET_ID = "xx-xxxx";
 const NAMA_TAB_UTAMA = "xxx";
-const WA_PHONE_NUMBER_ID = "xxxx";
-const WA_ACCESS_TOKEN = "xxxx";
-const WA_TEMPLATE_NAME = "notifikasi_tiket";
-const WA_WEBHOOK_VERIFY_TOKEN = "xxxx";
+const FONNTE_TOKEN = "xxxx"; // Device API Token dari dashboard Fonnte
+const FONNTE_API_URL = "https://api.fonnte.com/send";
 const SKM_URL = "xx";
 const WEBAPP_EXEC_URL = "https://script.google.com/macros/s/AKfycbyWzBMUlKNwPyil99TQh1B9UlbwGa3OHMdvKqdoHcsYYpc5Knxz5n3viDGwVj-dvlXP/exec";
 
@@ -186,7 +184,7 @@ function onFormSubmit(e) {
             if (noWaRaw && noWaRaw !== 'KOSONG') {
                 const cleanNoWa = formatNomorWA(noWaRaw);
                 if (isValidIndonesianPhone(cleanNoWa)) {
-                    sendWhatsAppUser(cleanNoWa, safeNama, idTicketDev); // Kirim ke nomor testing Anda
+                    kirimWaFonnte(cleanNoWa, buildPesanTiketBaru(safeNama, idTicketDev)); // Kirim ke nomor testing Anda
                 } else {
                     Logger.log(`[DEV] Baris ${rowDev}: Nomor WA (${cleanNoWa}) tidak memenuhi format 628. Notifikasi WA dilewati.`);
                 }
@@ -223,7 +221,7 @@ function onFormSubmit(e) {
             if (noWaRaw && noWaRaw !== 'KOSONG') {
                 const cleanNoWa = formatNomorWA(noWaRaw);
                 if (isValidIndonesianPhone(cleanNoWa)) {
-                    sendWhatsAppUser(cleanNoWa, safeNama, idTicket);
+                    kirimWaFonnte(cleanNoWa, buildPesanTiketBaru(safeNama, idTicket));
                 } else {
                     Logger.log(`Baris ${rowProd}: Nomor WA (${cleanNoWa}) tidak memenuhi format 628. Notifikasi WA dilewati.`);
                 }
@@ -281,40 +279,14 @@ function sendTelegramAdmin(idTicket, nama, nik, nama_instansi, jenis_keperluan, 
     return null;
 }
 
-function sendWhatsAppUser(noWa, name, id_ticket) {
-    const url = `https://graph.facebook.com/v25.0/${WA_PHONE_NUMBER_ID}/messages`;
-
-    const payload = {
-        "messaging_product": "whatsapp",
-        "to": noWa,
-        "type": "template",
-        "template": {
-            "name": WA_TEMPLATE_NAME,
-            "language": { "code": "id" },
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [
-                        { "type": "text", "text": name },
-                        { "type": "text", "text": id_ticket }
-                    ]
-                }
-            ]
-        }
-    };
-
-    const options = {
-        "method": "post",
-        "contentType": "application/json",
-        "headers": {
-            "Authorization": "Bearer " + WA_ACCESS_TOKEN
-        },
-        "payload": JSON.stringify(payload),
-        "muteHttpExceptions": true
-    };
-
-    const response = UrlFetchApp.fetch(url, options);
-    Logger.log("Log WhatsApp: " + response.getContentText());
+function buildPesanTiketBaru(nama, idTicket) {
+    return `Halo Bapak/Ibu *${nama}*,\n\n` +
+        `Terima kasih telah mengisi formulir Buku Tamu Online DPMD Kabupaten Muara Enim.\n` +
+        `Laporan/kunjungan Anda telah tercatat dengan nomor tiket:\n` +
+        `🎫 *${idTicket}*\n\n` +
+        `Untuk memantau perkembangan tindak lanjut, Anda dapat membalas pesan ini kapan saja dengan format:\n` +
+        `*CEK ${idTicket}*\n\n` +
+        `Terima kasih. 🙏`;
 }
 
 function formatNomorWA(phone) {
@@ -334,14 +306,21 @@ function doPost(e) {
         }
 
         const rawData = e.postData.contents;
-        const data = JSON.parse(rawData);
+        let data;
+        try {
+            data = JSON.parse(rawData);
+        } catch (parseErr) {
+            // Fonnte dapat mengirim webhook sebagai form-encoded, bukan JSON
+            data = e.parameter || {};
+        }
 
         if (data.update_id) {
             return handleTelegramWebhook(data, rawData);
         }
 
-        if (data.object === "whatsapp_business_account" || data.entry) {
-            return handleWhatsAppWebhook(data, rawData);
+        // Webhook pesan masuk dari Fonnte
+        if (data.sender) {
+            return handleFonnteWebhook(data, rawData);
         }
 
 
@@ -419,108 +398,228 @@ function handleTelegramWebhook(data, rawData) {
     return HtmlService.createHtmlOutput("OK");
 }
 
-function handleWhatsAppWebhook(data, rawData) {
-    let waUniqueId = "";
-
+function handleFonnteWebhook(data, rawData) {
     try {
-        const changeValue = data.entry?.[0]?.changes?.[0]?.value;
-
-        if (changeValue?.messages?.[0]) {
-            waUniqueId = changeValue.messages[0].id;
-        } else if (changeValue?.statuses?.[0]) {
-            waUniqueId = changeValue.statuses[0].id;
-        } else {
-            waUniqueId = "wa_init_" + new Date().getTime();
+        const sender = formatNomorWA(data.sender || "");
+        if (!sender) {
+            return HtmlService.createHtmlOutput("OK");
         }
-    } catch (err) {
-        waUniqueId = "wa_err_" + new Date().getTime();
-    }
 
-    const cache = CacheService.getScriptCache();
-    const cacheKey = "processed_wa_" + waUniqueId;
-
-    let isDuplicate = false;
-    const lock = LockService.getScriptLock();
-    try {
-        if (lock.tryLock(3000)) {
-            if (cache.get(cacheKey)) {
-                isDuplicate = true;
-            } else {
-                cache.put(cacheKey, "true", 7200);
-            }
+        // Abaikan pesan grup & pesan dari nomor bot sendiri (cegah looping)
+        if (String(data.isgroup).toLowerCase() === "true") {
+            return HtmlService.createHtmlOutput("OK");
         }
-    } catch (e) {
-        console.error("Lock/Cache Error in handleWhatsAppWebhook (proceeding anyway):", e);
-    } finally {
+        const deviceNumber = formatNomorWA(data.device || "");
+        if (deviceNumber && sender === deviceNumber) {
+            return HtmlService.createHtmlOutput("OK");
+        }
+
+        const userText = (data.message || data.text || "").toString().trim();
+
+        // Anti-duplikasi (Fonnte dapat mengirim ulang webhook jika respon lambat)
+        const cache = CacheService.getScriptCache();
+        const digest = Utilities.base64Encode(
+            Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, sender + "|" + userText)
+        );
+        const dedupKey = data.id ? "fn_" + data.id : "fn_" + digest;
+        const dedupTtl = data.id ? 7200 : 10;
+
+        let isDuplicate = false;
+        const lock = LockService.getScriptLock();
         try {
-            if (lock.hasLock()) {
-                lock.releaseLock();
+            if (lock.tryLock(3000)) {
+                if (cache.get(dedupKey)) {
+                    isDuplicate = true;
+                } else {
+                    cache.put(dedupKey, "1", dedupTtl);
+                }
             }
-        } catch (el) {
-            console.error("Error releasing lock:", el);
+        } catch (e) {
+            console.error("Lock/Cache Error in handleFonnteWebhook (proceeding anyway):", e);
+        } finally {
+            try {
+                if (lock.hasLock()) {
+                    lock.releaseLock();
+                }
+            } catch (el) {
+                console.error("Error releasing lock:", el);
+            }
         }
-    }
 
-    if (isDuplicate) {
-        return HtmlService.createHtmlOutput("OK");
-    }
+        if (isDuplicate) {
+            return HtmlService.createHtmlOutput("OK");
+        }
 
-    prosesPendingWhatsAppUpdate(waUniqueId, data);
+        prosesPendingFonnteUpdate(sender, userText, data);
+    } catch (err) {
+        console.error("Gagal memproses webhook Fonnte:", err);
+    }
 
     return HtmlService.createHtmlOutput("OK");
+}
+
+// Cooldown sapaan otomatis per pengirim. 21600 detik = batas maksimum CacheService (6 jam).
+const WA_MENU_COOLDOWN_SECONDS = 21600;
+
+const WA_PESAN_MENU =
+    `👋 Halo! Selamat datang di Layanan Si Buku Tamu Online DPMD Kabupaten Muara Enim.\n\n` +
+    `Untuk mengecek status perkembangan laporan Anda, silakan ketik:\n` +
+    `*CEK [Nomor Tiket]*\n\n` +
+    `_Pesan ini dikirim otomatis. Jika Anda ingin menghubungi petugas, silakan langsung tulis pesan Anda di sini. Ketik MENU untuk menampilkan panduan ini kembali._`;
+
+const WA_PESAN_MEDIA =
+    `👋 *Halo Pengguna Layanan*\n\n` +
+    `Sistem otomatis kami belum dapat memproses pesan non-teks (seperti gambar, dokumen, pesan suara, atau lokasi).\n\n` +
+    `💡 *Untuk mengecek status perkembangan laporan Anda*, silakan ketik pesan teks dengan format:\n` +
+    `*CEK [Nomor Tiket]*\n\n` +
+    `_Contoh: CEK PMD-20260920-2-ABCD_\n\n` +
+    `_Pesan ini dikirim otomatis. Ketik MENU untuk menampilkan panduan lengkap._`;
+
+function klasifikasiPesanWa(teks) {
+    const t = (teks || "").trim();
+    if (!t) return { tipe: "MEDIA" };
+
+    if (/^cek\b/i.test(t)) {
+        const matchTiket = t.match(/PMD-\d{8}-\d+-[A-Z0-9]{3,6}/i);
+        if (matchTiket) return { tipe: "CEK", tiket: matchTiket[0].toUpperCase() };
+        if (/^cek$/i.test(t)) return { tipe: "CEK_KOSONG" };
+        const matchSatuToken = t.match(/^cek\s+(\S+)$/i);
+        // "CEK <satu kata>" dianggap salah ketik tiket; kalimat biasa ("cek dulu ya pak") dianggap obrolan umum
+        if (matchSatuToken) return { tipe: "CEK", tiket: matchSatuToken[1] };
+    }
+
+    if (/^(menu|bantuan|help)$/i.test(t)) return { tipe: "MENU" };
+    return { tipe: "UMUM" };
+}
+
+function kirimSapaanSekali(userPhone, isMedia) {
+    const cache = CacheService.getScriptCache();
+    const key = `wa_menu_sent_${userPhone}`;
+    let sudahDikirim = false;
+    try {
+        sudahDikirim = !!cache.get(key);
+    } catch (e) {
+        console.error("Cache Error at wa_menu get:", e);
+    }
+
+    if (sudahDikirim) {
+        console.log(`[WA] Sapaan otomatis ke ${userPhone} dilewati (masih dalam cooldown). Pesan dibiarkan untuk dibalas petugas.`);
+        return;
+    }
+
+    try {
+        cache.put(key, "1", WA_MENU_COOLDOWN_SECONDS);
+    } catch (e) {
+        console.error("Cache Error at wa_menu put:", e);
+    }
+    kirimWaFonnte(userPhone, isMedia ? WA_PESAN_MEDIA : WA_PESAN_MENU);
+}
+
+function prosesPendingFonnteUpdate(userPhone, userText, data) {
+    try {
+        const pesan = klasifikasiPesanWa(userText);
+
+        switch (pesan.tipe) {
+            case "CEK":
+                prosesPencarianTiket(userPhone, pesan.tiket);
+                break;
+            case "CEK_KOSONG":
+                kirimWaFonnte(userPhone, "⚠️ Format salah.\nSilakan ketik: *CEK [Nomor Tiket]*");
+                break;
+            case "MENU": {
+                // Permintaan eksplisit: selalu dijawab (dibatasi 3 detik per pengirim agar tidak spam)
+                const cache = CacheService.getScriptCache();
+                const rateKey = `rate_wa_menu_${userPhone}`;
+                if (!cache.get(rateKey)) {
+                    try {
+                        cache.put(rateKey, "1", 3);
+                    } catch (e) { /* abaikan error cache */ }
+                    kirimWaFonnte(userPhone, WA_PESAN_MENU);
+                }
+                break;
+            }
+            case "MEDIA":
+                kirimSapaanSekali(userPhone, true);
+                break;
+            default:
+                kirimSapaanSekali(userPhone, false);
+        }
+    } catch (err) {
+        console.error("Gagal memproses pesan Fonnte dari " + userPhone + ": ", err);
+    }
+}
+
+function cariTiketDiSpreadsheet(spreadsheetId, ticketId) {
+    try {
+        const sheet = SpreadsheetApp.openById(spreadsheetId).getSheetByName(NAMA_TAB_UTAMA);
+        if (!sheet) {
+            console.error(`[CEK] Sheet '${NAMA_TAB_UTAMA}' tidak ditemukan di spreadsheet ${spreadsheetId}`);
+            return null;
+        }
+        const data = sheet.getDataRange().getValues();
+        const target = ticketId.toString().trim().toUpperCase();
+        const colIndexTiket = 9;
+        for (let i = data.length - 1; i >= 1; i--) {
+            if ((data[i][colIndexTiket] || "").toString().trim().toUpperCase() === target) {
+                return data[i];
+            }
+        }
+    } catch (err) {
+        console.error(`[CEK] Gagal membaca spreadsheet ${spreadsheetId}: ` + err.toString());
+    }
+    return null;
 }
 
 function prosesPencarianTiket(userPhone, ticketId) {
     const cleanTicketId = (ticketId || "").trim();
 
     if (!isValidTicketFormat(cleanTicketId)) {
-        kirimWaTeksBiasa(userPhone, `⚠️ *Format Tiket Tidak Valid*\n\nFormat nomor tiket yang Anda masukkan tidak sesuai.\nContoh format tiket yang benar: *PMD-20260913-2-ABCD*\n\nSilakan periksa kembali karakter dan ejaan tiket Anda.`);
+        kirimWaFonnte(userPhone, `⚠️ *Format Tiket Tidak Valid*\n\nFormat nomor tiket yang Anda masukkan tidak sesuai.\nContoh format tiket yang benar: *PMD-20260913-2-ABCD*\n\nSilakan periksa kembali karakter dan ejaan tiket Anda.`);
         return;
     }
 
     const cache = CacheService.getScriptCache();
     const rateKey = `rate_wa_search_${userPhone}`;
     if (cache.get(rateKey)) {
-        kirimWaTeksBiasa(userPhone, `⏳ Mohon tunggu beberapa detik sebelum melakukan pencarian tiket kembali.`);
+        kirimWaFonnte(userPhone, `⏳ Mohon tunggu beberapa detik sebelum melakukan pencarian tiket kembali.`);
         return;
     }
     try {
         cache.put(rateKey, "1", 3);
     } catch (e) { /* abaikan error cache */ }
 
-    const sheet = SpreadsheetApp.openById(SPREADSHEET_ID);
-    const data = sheet.getDataRange().getValues();
+    // Cari di PROD lebih dulu; jika tidak ada, cari di spreadsheet DEV (tiket uji [TEST]/DEV-)
+    let baris = cariTiketDiSpreadsheet(SPREADSHEET_ID, cleanTicketId);
+    let isDev = false;
+    if (!baris && DEV_SPREADSHEET_ID) {
+        baris = cariTiketDiSpreadsheet(DEV_SPREADSHEET_ID, cleanTicketId);
+        isDev = !!baris;
+    }
 
-    const colIndexTiket = 9;
     const colIndexStatus = 10;
     const colIndexNama = 1;
     const colIndexUlasan = 12;
     const colIndexBidangPJ = 11;
     const colIndexKeperluan = 7;
 
-    let rowFound = -1;
-
-    for (let i = data.length - 1; i >= 1; i--) {
-        if (data[i][colIndexTiket].toString().toUpperCase() === cleanTicketId.toUpperCase()) {
-            rowFound = i;
-            break;
-        }
-    }
-
-    if (rowFound !== -1) {
-        const namaUser = data[rowFound][colIndexNama] || "Pemohon";
-        const statusSaatIni = data[rowFound][colIndexStatus] || "Menunggu Tindakan";
-        const ulasanAdmin = data[rowFound][colIndexUlasan] || "Belum ada ulasan dari petugas.";
-        const bidangPJ = data[rowFound][colIndexBidangPJ] || "Belum ditentukan";
-        const keperluan = data[rowFound][colIndexKeperluan] || "Tidak ada keterangan";
+    if (baris) {
+        const namaUser = baris[colIndexNama] || "Pemohon";
+        const statusSaatIni = (baris[colIndexStatus] || "Menunggu Tindakan").toString();
+        const ulasanAdmin = baris[colIndexUlasan] || "Belum ada ulasan dari petugas.";
+        const bidangPJ = baris[colIndexBidangPJ] || "Belum ditentukan";
+        const keperluan = baris[colIndexKeperluan] || "Tidak ada keterangan";
 
         let pesanBalasan = `📄 *DETAIL STATUS LAPORAN* 📄\n\n` +
-            `🎫 *ID Tiket:* ${cleanTicketId}\n` +
+            `🎫 *ID Tiket:* ${cleanTicketId.toUpperCase()}\n` +
             `👤 *Nama:* ${namaUser}\n` +
             `🏢 *Bidang Penanggung Jawab:* ${bidangPJ}\n` +
             `📌 *Keperluan Kunjungan:* ${keperluan}\n` +
             `📊 *Status Laporan:* _${statusSaatIni}_\n` +
             `📝 *Keterangan/Ulasan:* ${ulasanAdmin}\n\n`;
+
+        if (isDev) {
+            pesanBalasan += `🧪 _Data uji coba (DEV)_\n\n`;
+        }
 
         if (statusSaatIni.toUpperCase() === "DITOLAK") {
             pesanBalasan += `🙏 Kami mohon maaf, laporan Anda tidak dapat diproses lebih lanjut.\n\n` +
@@ -528,84 +627,57 @@ function prosesPencarianTiket(userPhone, ticketId) {
                 `${SKM_URL}\n\n` +
                 `Jika masih ada hal yang perlu ditanyakan, silakan menghubungi petugas kami agar mendapatkan penjelasan lebih lanjut. Terima kasih atas pengertian dan kerja samanya.`;
         }
-        kirimWaTeksBiasa(userPhone, pesanBalasan);
+        kirimWaFonnte(userPhone, pesanBalasan);
     } else {
-        kirimWaTeksBiasa(userPhone, `❌ *Tiket Tidak Ditemukan*\n\nMaaf, nomor tiket *${cleanTicketId}* tidak terdaftar di sistem kami. Mohon periksa kembali karakter dan ejaan tiket Anda.`);
+        kirimWaFonnte(userPhone, `❌ *Tiket Tidak Ditemukan*\n\nMaaf, nomor tiket *${cleanTicketId}* tidak terdaftar di sistem kami. Mohon periksa kembali karakter dan ejaan tiket Anda.`);
     }
 }
 
-function kirimWaTeksBiasa(noWa, teks) {
-    const url = `https://graph.facebook.com/v25.0/${WA_PHONE_NUMBER_ID}/messages`;
-    const payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": noWa,
-        "type": "text",
-        "text": {
-            "preview_url": true,
-            "body": teks
-        }
-    };
-
-    const options = {
-        "method": "post",
-        "contentType": "application/json",
-        "headers": {
-            "Authorization": "Bearer " + WA_ACCESS_TOKEN
+function buildFonnteRequest(noWa, pesan) {
+    return {
+        url: FONNTE_API_URL,
+        method: "post",
+        headers: { "Authorization": FONNTE_TOKEN },
+        payload: {
+            target: formatNomorWA(noWa),
+            message: pesan,
+            countryCode: "62"
         },
-        "payload": JSON.stringify(payload),
-        "muteHttpExceptions": true
+        muteHttpExceptions: true
     };
-    UrlFetchApp.fetch(url, options);
 }
 
-function prosesPendingWhatsAppUpdate(waUniqueId, data) {
-    if (!data) return;
-
+function logFonnteResponse(response, target) {
     try {
-        const changeValue = data.entry?.[0]?.changes?.[0]?.value;
-
-        if (Array.isArray(changeValue?.messages) && changeValue.messages.length > 0) {
-            const messageObject = changeValue.messages[0];
-            const userPhone = messageObject.from;
-
-            if (messageObject.type === "text" && messageObject.text?.body) {
-                const userText = messageObject.text.body.trim();
-
-                if (userText.toUpperCase().startsWith("CEK")) {
-                    const ticketId = userText.replace(/CEK/i, "").trim();
-                    if (ticketId) {
-                        prosesPencarianTiket(userPhone, ticketId);
-                    } else {
-                        kirimWaTeksBiasa(userPhone, "⚠️ Format salah.\nSilakan ketik: *CEK [Nomor Tiket]*");
-                    }
-                } else {
-                    const menuSapaan = `👋 Halo! Selamat datang di Layanan Si Buku Tamu Online DPMD Kabupaten Muara Enim.\n\nUntuk mengecek status perkembangan laporan Anda, silakan ketik:\n*CEK [Nomor Tiket]*`;
-                    kirimWaTeksBiasa(userPhone, menuSapaan);
-                }
-            } else {
-                // Rate limit fallback per user (max 1 fallback per 3 detik untuk mencegah spam pengiriman batch media)
-                const cache = CacheService.getScriptCache();
-                const fallbackRateKey = `rate_wa_fallback_${userPhone}`;
-                if (!cache.get(fallbackRateKey)) {
-                    try {
-                        cache.put(fallbackRateKey, "1", 3);
-                    } catch (e) { /* abaikan error cache */ }
-
-                    const pesanFallbackMedia =
-                        `👋 *Halo Pengguna Layanan*\n\n` +
-                        `Mohon maaf, saat ini sistem otomatis kami belum dapat memproses pesan non-teks (seperti gambar, dokumen, pesan suara, atau lokasi).\n\n` +
-                        `💡 *Untuk mengecek status perkembangan laporan Anda*, silakan ketik pesan teks dengan format:\n` +
-                        `*CEK [Nomor Tiket]*\n\n` +
-                        `_Contoh: CEK PMD-20260920-2-ABCD_\n\n` +
-                        `Terima kasih! 🙏`;
-                    kirimWaTeksBiasa(userPhone, pesanFallbackMedia);
-                }
-            }
+        const body = response.getContentText();
+        let ok = false;
+        try {
+            ok = JSON.parse(body).status === true;
+        } catch (pe) { /* respon bukan JSON */ }
+        if (ok) {
+            console.log(`[Fonnte] Terkirim ke ${target}: ${body}`);
+        } else {
+            console.error(`[Fonnte] GAGAL kirim ke ${target} (HTTP ${response.getResponseCode()}): ${body}`);
         }
-
     } catch (err) {
-        console.error("Gagal memproses Pending WhatsApp Update ID " + waUniqueId + ": ", err);
+        console.error("[Fonnte] Gagal membaca respon: " + err.toString());
+    }
+}
+
+function kirimWaFonnte(noWa, pesan) {
+    try {
+        const req = buildFonnteRequest(noWa, pesan);
+        const response = UrlFetchApp.fetch(req.url, {
+            method: req.method,
+            headers: req.headers,
+            payload: req.payload,
+            muteHttpExceptions: true
+        });
+        logFonnteResponse(response, req.payload.target);
+        return response;
+    } catch (err) {
+        console.error("[Fonnte] Error saat mengirim WA: " + err.toString());
+        return null;
     }
 }
 
@@ -926,26 +998,15 @@ function prosesPendingUpdate(updateId, data) {
 
                 const requests = [];
 
-                // Push WhatsApp API call ke array request paralel jika SELESAI
+                let waRequestIndex = -1;
+                // Push WhatsApp (Fonnte) API call ke array request paralel jika SELESAI
                 if (jenis === "SELESAI" && noWaRaw && noWaRaw !== "KOSONG" && noWaRaw !== "") {
                     const noWaBersih = formatNomorWA(noWaRaw);
                     const pesanSelesai =
                         `Halo Bapak/Ibu,\n\nKami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTicket}* telah *SELESAI* ditindaklanjuti.\n\nSebagai upaya peningkatan kualitas pelayanan publik, silakan Bapak/Ibu mengisi Survei Kepuasan Masyarakat (SKM) melalui tautan berikut:\n🔗 ${SKM_URL}\n\nSetelah mengisi survei tersebut, Anda dapat melihat detail penyelesaian dengan mengetik:\n*CEK ${idTicket}*\n\nTerima kasih atas partisipasi Anda telah menggunakan SI Buku Tamu Online DPMD Kabupaten Muara Enim. 🙏`;
 
-                    requests.push({
-                        url: `https://graph.facebook.com/v25.0/${WA_PHONE_NUMBER_ID}/messages`,
-                        method: 'post',
-                        contentType: 'application/json',
-                        headers: { "Authorization": "Bearer " + WA_ACCESS_TOKEN },
-                        payload: JSON.stringify({
-                            "messaging_product": "whatsapp",
-                            "recipient_type": "individual",
-                            "to": noWaBersih,
-                            "type": "text",
-                            "text": { "preview_url": true, "body": pesanSelesai }
-                        }),
-                        muteHttpExceptions: true
-                    });
+                    waRequestIndex = requests.length;
+                    requests.push(buildFonnteRequest(noWaBersih, pesanSelesai));
                 }
 
                 // === Batch Telegram API calls ===
@@ -1009,7 +1070,10 @@ function prosesPendingUpdate(updateId, data) {
                 });
 
                 // Kirim SEMUA request network (WhatsApp + Telegram) secara PARALEL dalam 1 batch
-                UrlFetchApp.fetchAll(requests);
+                const batchResponses = UrlFetchApp.fetchAll(requests);
+                if (waRequestIndex >= 0 && batchResponses[waRequestIndex]) {
+                    logFonnteResponse(batchResponses[waRequestIndex], formatNomorWA(noWaRaw));
+                }
 
                 statusLog = "SUCCESS";
                 detailLog = `Laporan berhasil ${jenis === "TOLAK" ? "DITOLAK" : "DISELESAIKAN"} oleh ${pengisi}`;
@@ -1030,16 +1094,8 @@ function prosesPendingUpdate(updateId, data) {
 }
 
 function doGet(e) {
-    const mode = e.parameter["hub.mode"];
-    const token = e.parameter["hub.verify_token"];
-    const challenge = e.parameter["hub.challenge"];
-
-    if (mode && token) {
-        if (mode === "subscribe" && token === WA_WEBHOOK_VERIFY_TOKEN) {
-            return ContentService.createTextOutput(challenge);
-        }
-    }
-    return ContentService.createTextOutput("Forbidden");
+    // Fonnte mensyaratkan URL webhook mengizinkan metode GET (ping/verifikasi).
+    return ContentService.createTextOutput("OK");
 }
 
 function webhookTelegramCheck() {
@@ -1223,7 +1279,7 @@ function onSpreadsheetEdit(e) {
                         const pesanSelesai =
                             `Halo Bapak/Ibu,\n\nKami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTicket}* telah *SELESAI* ditindaklanjuti.\n\nCatatan Penyelesaian:\n${catatan}\n\nSebagai upaya peningkatan kualitas pelayanan publik, silakan Bapak/Ibu mengisi Survei Kepuasan Masyarakat (SKM) melalui tautan berikut:\n🔗 ${SKM_URL}\n\nSetelah mengisi survei tersebut, Anda dapat melihat detail penyelesaian dengan mengetik:\n*CEK ${idTicket}*\n\nTerima kasih atas partisipasi Anda telah menggunakan SI Buku Tamu Online DPMD Kabupaten Muara Enim. 🙏`;
 
-                        kirimWaTeksBiasa(noWaBersih, pesanSelesai);
+                        kirimWaFonnte(noWaBersih, pesanSelesai);
                         cache.put(cacheKey, "true", 86400); // 24 jam agar tidak dikirim ulang
                         console.log(`[onSpreadsheetEdit Row ${row}] WA Selesai berhasil dikirim ke ${noWaBersih}`);
                     }
