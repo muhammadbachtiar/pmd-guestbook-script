@@ -34,6 +34,27 @@ function isValidTicketFormat(ticketId) {
     return /^PMD-\d{8}-\d+-[A-Z0-9]{3,6}$/i.test(ticketId.trim());
 }
 
+function isTestData(text) {
+    if (!text) return false;
+    return /\[TEST\]|\[DEV\]|\bDEV[-_]/i.test(text.toString().trim());
+}
+
+function prepareBaseTextForMarkdown(baseText) {
+    if (!baseText) return "";
+    let safe = escapeMarkdown(baseText);
+    // Kembalikan format tebal pada label baku agar tampilan pesan tetap rapi dan konsisten
+    safe = safe.replace(/🚨\s*(Laporan\/Tamu Baru Masuk!)\s*🚨/g, "🚨 *$1* 🚨")
+               .replace(/🧪\s*(\[DATA UJI COBA \(DEV\)\])/g, "🧪 *$1*")
+               .replace(/📌\s*ID Tiket:/g, "📌 *ID Tiket:*")
+               .replace(/👤\s*Nama:/g, "👤 *Nama:*")
+               .replace(/🆔\s*NIK:/g, "🆔 *NIK:*")
+               .replace(/🏢\s*Instansi:/g, "🏢 *Instansi:*")
+               .replace(/🎯\s*Keperluan:/g, "🎯 *Keperluan:*")
+               .replace(/📝\s*Uraian:/g, "📝 *Uraian:*")
+               .replace(/Dashboard atau Google Sheets/g, "*Dashboard* atau *Google Sheets*");
+    return safe;
+}
+
 function validateRowBounds(sheet, row) {
     if (!sheet || !row || isNaN(row)) return false;
     const r = parseInt(row);
@@ -109,7 +130,7 @@ function onFormSubmit(e) {
 
         const nama = e.namedValues['Nama Lengkap'] ? e.namedValues['Nama Lengkap'][0] : 'KOSONG';
 
-        if (nama.includes("[TEST]") || nama.includes("DEV-")) {
+        if (isTestData(nama)) {
 
             const ssDev = SpreadsheetApp.openById(DEV_SPREADSHEET_ID);
             const sheetDev = ssDev.getSheetByName(sheetProd.getName());
@@ -134,20 +155,20 @@ function onFormSubmit(e) {
 
                         // Validasi tambahan: Pastikan respon yang dihapus memang benar data TEST
                         const itemResponses = lastResponse.getItemResponses();
-                        let isTestData = false;
+                        let isTestResponse = false;
 
                         for (let i = 0; i < itemResponses.length; i++) {
                             if (itemResponses[i].getItem().getTitle() === 'Nama Lengkap') {
                                 const val = itemResponses[i].getResponse();
-                                if (val.includes("[TEST]") || val.includes("DEV-")) {
-                                    isTestData = true;
+                                if (isTestData(val)) {
+                                    isTestResponse = true;
                                 }
                                 break;
                             }
                         }
 
                         // Jika tervalidasi benar data test, hapus dari database internal Form
-                        if (isTestData) {
+                        if (isTestResponse) {
                             form.deleteResponse(lastResponse.getId());
                             Logger.log("[DEV] Sukses menghapus data test dari internal Google Form.");
                         }
@@ -241,8 +262,9 @@ function sendTelegramAdmin(idTicket, nama, nik, nama_instansi, jenis_keperluan, 
     const safeKeperluan = escapeMarkdown(jenis_keperluan);
     const safeUraian = escapeMarkdown(uraian);
 
+    const devHeader = isDev ? `🧪 *[DATA UJI COBA (DEV)]*\n\n` : ``;
     const pesanText =
-        `🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n` +
+        `${devHeader}🚨 *Laporan/Tamu Baru Masuk!* 🚨\n\n` +
         `  📌 *ID Tiket:* ${safeTicket}\n` +
         `  👤 *Nama:* ${safeNama}\n` +
         `  🆔 *NIK:* ${safeNik}\n` +
@@ -462,7 +484,7 @@ function handleFonnteWebhook(data, rawData) {
 const WA_MENU_COOLDOWN_SECONDS = 21600;
 
 const WA_PESAN_MENU =
-    `👋 Halo! Selamat datang di Layanan Si Buku Tamu Online DPMD Kabupaten Muara Enim.\n\n` +
+    `👋 Halo! Selamat datang di Layanan SiBUDE DPMD Kabupaten Muara Enim.\n\n` +
     `Untuk mengecek status perkembangan laporan Anda, silakan ketik:\n` +
     `*CEK [Nomor Tiket]*\n\n` +
     `_Pesan ini dikirim otomatis. Jika Anda ingin menghubungi petugas, silakan langsung tulis pesan Anda di sini. Ketik MENU untuk menampilkan panduan ini kembali._`;
@@ -712,7 +734,7 @@ function prosesPendingUpdate(updateId, data) {
             } else if (isReply && data.message.reply_to_message) {
                 msgText = data.message.reply_to_message.text || "";
             }
-            if (msgText.includes("[TEST]") || msgText.includes("DEV-")) {
+            if (isTestData(msgText)) {
                 isDev = true;
                 console.log("[Lightweight DEV Detection] Teks pesan mengandung marker DEV.");
             }
@@ -768,7 +790,26 @@ function prosesPendingUpdate(updateId, data) {
 
             // Dynamic Row Lookup: Fast Path + Fallback Scan (anti row-shifting)
             if (idTicketCb) {
-                const verifiedRow = findRowByTicketId(sheet, idTicketCb, suggestedRow);
+                let verifiedRow = findRowByTicketId(sheet, idTicketCb, suggestedRow);
+                if (verifiedRow === -1) {
+                    // Cross-Sheet Fallback: Cek sheet pasangannya (DEV <-> PROD) jika ada mismatch/migrasi
+                    const fallbackSpreadsheetId = isDev ? SPREADSHEET_ID : DEV_SPREADSHEET_ID;
+                    if (fallbackSpreadsheetId) {
+                        try {
+                            const altSheet = SpreadsheetApp.openById(fallbackSpreadsheetId).getSheetByName(NAMA_TAB_UTAMA);
+                            const altRow = findRowByTicketId(altSheet, idTicketCb, suggestedRow);
+                            if (altRow !== -1) {
+                                console.log(`[Cross-Sheet Fallback] Tiket ${idTicketCb} ditemukan di sheet alternatif (${isDev ? 'PROD' : 'DEV'}). Mengalihkan sheet.`);
+                                _sheet = altSheet;
+                                isDev = !isDev;
+                                verifiedRow = altRow;
+                            }
+                        } catch (altErr) {
+                            console.warn("Gagal cek sheet alternatif: " + altErr.toString());
+                        }
+                    }
+                }
+
                 if (verifiedRow === -1) {
                     console.warn(`[Row Lookup Guard] Tiket ${idTicketCb} tidak ditemukan di Spreadsheet.`);
                     try {
@@ -803,18 +844,22 @@ function prosesPendingUpdate(updateId, data) {
                 cache.remove(`lock_cb_${chatId}_${msgId}`);
 
                 const cleanText = msgText.split(/\n\n(?:[✅⏳]\s*)?\*?STATUS:/i)[0].trim();
+                const safeCleanText = prepareBaseTextForMarkdown(cleanText);
 
                 sheet.getRange(rowLog, 11, 1, 2).setValues([["Menunggu Tindakan", ""]]);
-                UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageText`, {
+                const editRes = UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageText`, {
                     method: 'post', contentType: 'application/json', muteHttpExceptions: true,
                     payload: JSON.stringify({
                         chat_id: cq.message.chat.id,
                         message_id: cq.message.message_id,
-                        text: cleanText,
+                        text: safeCleanText,
                         parse_mode: 'Markdown',
                         reply_markup: default_keyboard(rowLog, isDev)
                     })
                 });
+                if (editRes.getResponseCode() !== 200) {
+                    console.error(`[Telegram Error] BATAL editMessageText failed (${editRes.getResponseCode()}): ${editRes.getContentText()}`);
+                }
                 statusLog = "SUCCESS";
                 detailLog = "Tombol dibatalkan";
                 return;
@@ -833,7 +878,10 @@ function prosesPendingUpdate(updateId, data) {
                     return;
                 }
 
-                const pesanUpdate = `${baseTextCb}\n\n✅ *STATUS: Diproses*\nOleh: ${namaBidang}\nPetugas: ${cq.from.first_name}`;
+                const safeBaseText = prepareBaseTextForMarkdown(baseTextCb);
+                const safeBidang = escapeMarkdown(namaBidang);
+                const safePetugas = escapeMarkdown(cq.from.first_name || "Petugas");
+                const pesanUpdate = `${safeBaseText}\n\n✅ *STATUS: Diproses*\nOleh: ${safeBidang}\nPetugas: ${safePetugas}`;
                 const devPrefix = isDev ? "DEV_" : "";
 
                 const keyboard = {
@@ -844,7 +892,7 @@ function prosesPendingUpdate(updateId, data) {
                 };
 
                 // Update tampilan Telegram TERLEBIH DAHULU agar respon terasa instan di UI admin (<300ms)
-                UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageText`, {
+                const editRes = UrlFetchApp.fetch(`https://api.telegram.org/bot${TELEBOT_TOKEN}/editMessageText`, {
                     method: 'post', contentType: 'application/json', muteHttpExceptions: true,
                     payload: JSON.stringify({
                         chat_id: cq.message.chat.id,
@@ -854,6 +902,9 @@ function prosesPendingUpdate(updateId, data) {
                         reply_markup: keyboard
                     })
                 });
+                if (editRes.getResponseCode() !== 200) {
+                    console.error(`[Telegram Error] PROSES editMessageText failed (${editRes.getResponseCode()}): ${editRes.getContentText()}`);
+                }
 
                 // Tulis ke Spreadsheet setelah tampilan Telegram ter-update (rowLog sudah terverifikasi)
                 sheet.getRange(rowLog, 11, 1, 2).setValues([["Diproses", namaBidang]]);
@@ -866,14 +917,18 @@ function prosesPendingUpdate(updateId, data) {
             else if (aksiLog === "TANYA") {
                 const jenis = parts[1]; // "SELESAI" atau "TOLAK"
                 const rowStr = rowLog.toString(); // rowLog sudah terverifikasi & di-refresh
+                const chatId = cq.message ? cq.message.chat.id : TELEGROUP_ID;
 
                 const idTicketTanya = idTicketCb || "Unknown";
                 const kataTugas = jenis === "TOLAK" ? "alasan penolakan" : "catatan penyelesaian";
-                const username = cq.from.username ? "@" + cq.from.username : cq.from.first_name;
+                const username = cq.from.username ? "@" + cq.from.username : (cq.from.first_name || "Petugas");
                 const originalMessageId = cq.message.message_id;
 
                 const labelStatus = jenis === "TOLAK" ? "Menunggu Alasan Penolakan" : "Menunggu Catatan Penyelesaian";
-                const pesanUpdate = `${baseTextCb}\n\n⏳ *STATUS: ${labelStatus}*\nOleh: ${username}`;
+                const safeBaseText = prepareBaseTextForMarkdown(baseTextCb);
+                const safeUsername = escapeMarkdown(username);
+
+                const pesanUpdate = `${safeBaseText}\n\n⏳ *STATUS: ${labelStatus}*\nOleh: ${safeUsername}`;
                 const devPrefix = isDev ? "DEV_" : "";
 
                 const keyboard = {
@@ -883,35 +938,51 @@ function prosesPendingUpdate(updateId, data) {
                 };
 
                 const devTag = isDev ? "_DEV" : "";
-                const replyMsg = `[#ROW_${rowStr}_${jenis}${devTag}] [#MAIN_${originalMessageId}] ${username}, silakan balas (reply) pesan ini dengan *${kataTugas}* untuk laporan ini.\nTiket: ${idTicketTanya}`;
+                // Kirim tag sebagai teks biasa agar bracket [#ROW] dan [#MAIN] tidak error pada parser Telegram
+                const replyMsg = `[#ROW_${rowStr}_${jenis}${devTag}] [#MAIN_${originalMessageId}]\n${username}, silakan balas (reply) pesan ini dengan ${kataTugas} untuk laporan ini.\nTiket: ${idTicketTanya}`;
 
                 const telegramBaseUrl = `https://api.telegram.org/bot${TELEBOT_TOKEN}`;
 
-                // Batching paralel request ke Telegram (edit pesan + sendMessage instruksi reply)
-                UrlFetchApp.fetchAll([
-                    {
-                        url: `${telegramBaseUrl}/editMessageText`,
+                // 1. Update pesan utama
+                const editRes = UrlFetchApp.fetch(`${telegramBaseUrl}/editMessageText`, {
+                    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+                    payload: JSON.stringify({
+                        chat_id: chatId,
+                        message_id: originalMessageId,
+                        text: pesanUpdate,
+                        parse_mode: 'Markdown',
+                        reply_markup: keyboard
+                    })
+                });
+                if (editRes.getResponseCode() !== 200) {
+                    console.error(`[Telegram Error] TANYA editMessageText failed (${editRes.getResponseCode()}): ${editRes.getContentText()}`);
+                }
+
+                // 2. Kirim instruksi reply ke grup
+                const sendRes = UrlFetchApp.fetch(`${telegramBaseUrl}/sendMessage`, {
+                    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+                    payload: JSON.stringify({
+                        chat_id: chatId,
+                        text: replyMsg,
+                        reply_to_message_id: originalMessageId,
+                        allow_sending_without_reply: true,
+                        reply_markup: { force_reply: true }
+                    })
+                });
+                const sendResCode = sendRes.getResponseCode();
+                const sendResBody = sendRes.getContentText();
+                if (sendResCode !== 200) {
+                    console.error(`[Telegram Error] TANYA sendMessage failed (${sendResCode}): ${sendResBody}`);
+                    // Fallback: Jika force_reply atau parameter tertentu ditolak permission grup, kirim sebagai pesan teks biasa
+                    UrlFetchApp.fetch(`${telegramBaseUrl}/sendMessage`, {
                         method: 'post', contentType: 'application/json', muteHttpExceptions: true,
                         payload: JSON.stringify({
-                            chat_id: cq.message.chat.id,
-                            message_id: cq.message.message_id,
-                            text: pesanUpdate,
-                            parse_mode: 'Markdown',
-                            reply_markup: keyboard
-                        })
-                    },
-                    {
-                        url: `${telegramBaseUrl}/sendMessage`,
-                        method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-                        payload: JSON.stringify({
-                            chat_id: TELEGROUP_ID,
+                            chat_id: chatId,
                             text: replyMsg,
-                            parse_mode: 'Markdown',
-                            reply_to_message_id: originalMessageId,
-                            reply_markup: { force_reply: true, selective: true }
+                            allow_sending_without_reply: true
                         })
-                    }
-                ]);
+                    });
+                }
 
                 statusLog = "SUCCESS";
                 detailLog = `Instruksi ${jenis} dikirim | MAIN_ID: ${originalMessageId}`;
@@ -942,7 +1013,26 @@ function prosesPendingUpdate(updateId, data) {
 
                 let rowLog = suggestedRowReply;
                 if (idTicketReply) {
-                    const verifiedRow = findRowByTicketId(sheet, idTicketReply, suggestedRowReply);
+                    let verifiedRow = findRowByTicketId(sheet, idTicketReply, suggestedRowReply);
+                    if (verifiedRow === -1) {
+                        // Cross-Sheet Fallback: Cek sheet pasangannya (DEV <-> PROD) jika ada mismatch/migrasi
+                        const fallbackSpreadsheetId = isDev ? SPREADSHEET_ID : DEV_SPREADSHEET_ID;
+                        if (fallbackSpreadsheetId) {
+                            try {
+                                const altSheet = SpreadsheetApp.openById(fallbackSpreadsheetId).getSheetByName(NAMA_TAB_UTAMA);
+                                const altRow = findRowByTicketId(altSheet, idTicketReply, suggestedRowReply);
+                                if (altRow !== -1) {
+                                    console.log(`[REPLY Cross-Sheet Fallback] Tiket ${idTicketReply} ditemukan di sheet alternatif (${isDev ? 'PROD' : 'DEV'}). Mengalihkan sheet.`);
+                                    _sheet = altSheet;
+                                    isDev = !isDev;
+                                    verifiedRow = altRow;
+                                }
+                            } catch (altErr) {
+                                console.warn("Gagal cek sheet alternatif: " + altErr.toString());
+                            }
+                        }
+                    }
+
                     if (verifiedRow === -1) {
                         console.warn(`[REPLY Row Guard] Tiket ${idTicketReply} tidak ditemukan di Spreadsheet.`);
                         try {
@@ -1003,7 +1093,7 @@ function prosesPendingUpdate(updateId, data) {
                 if (jenis === "SELESAI" && noWaRaw && noWaRaw !== "KOSONG" && noWaRaw !== "") {
                     const noWaBersih = formatNomorWA(noWaRaw);
                     const pesanSelesai =
-                        `Halo Bapak/Ibu,\n\nKami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTicket}* telah *SELESAI* ditindaklanjuti.\n\nSebagai upaya peningkatan kualitas pelayanan publik, silakan Bapak/Ibu mengisi Survei Kepuasan Masyarakat (SKM) melalui tautan berikut:\n🔗 ${SKM_URL}\n\nSetelah mengisi survei tersebut, Anda dapat melihat detail penyelesaian dengan mengetik:\n*CEK ${idTicket}*\n\nTerima kasih atas partisipasi Anda telah menggunakan SI Buku Tamu Online DPMD Kabupaten Muara Enim. 🙏`;
+                        `Halo Bapak/Ibu,\n\nKami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTicket}* telah *SELESAI* ditindaklanjuti.\n\nSebagai upaya peningkatan kualitas pelayanan publik, silakan Bapak/Ibu mengisi Survei Kepuasan Masyarakat (SKM) melalui tautan berikut:\n🔗 ${SKM_URL}\n\nSetelah mengisi survei tersebut, Anda dapat melihat detail penyelesaian dengan mengetik:\n*CEK ${idTicket}*\n\nTerima kasih atas partisipasi Anda telah menggunakan SiBUDE DPMD Kabupaten Muara Enim. 🙏`;
 
                     waRequestIndex = requests.length;
                     requests.push(buildFonnteRequest(noWaBersih, pesanSelesai));
@@ -1034,7 +1124,7 @@ function prosesPendingUpdate(updateId, data) {
                         contentType: 'application/json',
                         muteHttpExceptions: true,
                         payload: JSON.stringify({
-                            chat_id: TELEGROUP_ID,
+                            chat_id: chatId,
                             message_id: targetMsgId,
                             text: syncText,
                             parse_mode: 'Markdown',
@@ -1071,6 +1161,11 @@ function prosesPendingUpdate(updateId, data) {
 
                 // Kirim SEMUA request network (WhatsApp + Telegram) secara PARALEL dalam 1 batch
                 const batchResponses = UrlFetchApp.fetchAll(requests);
+                batchResponses.forEach((res, i) => {
+                    if (res.getResponseCode() !== 200) {
+                        console.error(`[Telegram/Fonnte Batch Error] request #${i} failed (${res.getResponseCode()}): ${res.getContentText()}`);
+                    }
+                });
                 if (waRequestIndex >= 0 && batchResponses[waRequestIndex]) {
                     logFonnteResponse(batchResponses[waRequestIndex], formatNomorWA(noWaRaw));
                 }
@@ -1277,7 +1372,7 @@ function onSpreadsheetEdit(e) {
                     const cacheKey = `wa_selesai_${isDev ? 'dev_' : ''}${row}_${idTicket}`;
                     if (!cache.get(cacheKey)) {
                         const pesanSelesai =
-                            `Halo Bapak/Ibu,\n\nKami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTicket}* telah *SELESAI* ditindaklanjuti.\n\nCatatan Penyelesaian:\n${catatan}\n\nSebagai upaya peningkatan kualitas pelayanan publik, silakan Bapak/Ibu mengisi Survei Kepuasan Masyarakat (SKM) melalui tautan berikut:\n🔗 ${SKM_URL}\n\nSetelah mengisi survei tersebut, Anda dapat melihat detail penyelesaian dengan mengetik:\n*CEK ${idTicket}*\n\nTerima kasih atas partisipasi Anda telah menggunakan SI Buku Tamu Online DPMD Kabupaten Muara Enim. 🙏`;
+                            `Halo Bapak/Ibu,\n\nKami informasikan bahwa laporan/pengaduan Anda dengan nomor tiket *${idTicket}* telah *SELESAI* ditindaklanjuti.\n\nCatatan Penyelesaian:\n${catatan}\n\nSebagai upaya peningkatan kualitas pelayanan publik, silakan Bapak/Ibu mengisi Survei Kepuasan Masyarakat (SKM) melalui tautan berikut:\n🔗 ${SKM_URL}\n\nSetelah mengisi survei tersebut, Anda dapat melihat detail penyelesaian dengan mengetik:\n*CEK ${idTicket}*\n\nTerima kasih atas partisipasi Anda telah menggunakan SiBUDE DPMD Kabupaten Muara Enim. 🙏`;
 
                         kirimWaFonnte(noWaBersih, pesanSelesai);
                         cache.put(cacheKey, "true", 86400); // 24 jam agar tidak dikirim ulang
