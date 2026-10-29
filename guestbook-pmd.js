@@ -4,13 +4,11 @@ const TELEGROUP_ID = "xxx";
 const SPREADSHEET_ID = "xxxx";
 const DEV_SPREADSHEET_ID = "xx-xxxx";
 const NAMA_TAB_UTAMA = "xxx";
-const FONNTE_TOKEN = "xxxx"; // Device API Token dari dashboard Fonnte
-const FONNTE_API_URL = "https://api.fonnte.com/send";
-const WA_PHONE_NUMBER_ID = "1097537613452548";
-const WA_ACCESS_TOKEN = "EAAlMxvSjLwoBSlL5P0dFRCVtEe6JWQZB1p4ZALGortREHeu75ioeZBnAQI7dDAnir2uRUakKKiZCZAdIRJg0zEYPhLsJev1UQPaYF6kiv85axcvcuMweo1jhdbZCfQZAZC5SqTRoNk11b3EgsxKHqJuqDZCLHSv6W7P7lqfdZCpdr5uQoNsy1NrAHqNEfR5MVQzd1V1FqMUv5uGqaibvEZBLc8NFLg5aw4uSk04ZBXcF7ppH8F2I0xjGZA29RbQIEVOMQQx4yFZBEREImIeLHmyxbKcYwCTzdv";
+const WA_PHONE_NUMBER_ID = "xxxx";
+const WA_ACCESS_TOKEN = "xxxx";
 const WA_TEMPLATE_NAME = "notifikasi_tiket";
-const WA_WEBHOOK_VERIFY_TOKEN = "DinasPMDMuaraEnim_Secret2026";
-const SKM_URL = "https://skm.go.id/share/instansi/f58db5a5-535f-4f5a-9e31-2474fe26119f/1";
+const WA_WEBHOOK_VERIFY_TOKEN = "xxxx";
+const SKM_URL = "xx";
 const WEBAPP_EXEC_URL = "https://script.google.com/macros/s/AKfycbyWzBMUlKNwPyil99TQh1B9UlbwGa3OHMdvKqdoHcsYYpc5Knxz5n3viDGwVj-dvlXP/exec";
 
 function escapeMarkdown(text) {
@@ -464,12 +462,12 @@ function handleWhatsAppWebhook(data, rawData) {
     }
 
     if (isDuplicate) {
-        return ContentService.createTextOutput("OK");
+        return HtmlService.createHtmlOutput("OK");
     }
 
     prosesPendingWhatsAppUpdate(waUniqueId, data);
 
-    return ContentService.createTextOutput("OK");
+    return HtmlService.createHtmlOutput("OK");
 }
 
 function prosesPencarianTiket(userPhone, ticketId) {
